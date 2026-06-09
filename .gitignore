@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Internal docs — stay local, never tracked (treat the repo as eventually-public).
+glass-m4l-handoff.md
+CLAUDE.md
+
+# Internal design references — third-party product photo + working mockup, local only.
+mockups/GlassPedal.jpeg
+mockups/Glass plugin mockup.png
+*.svg
+
+# Max for Live / Max scratch
+*.maxsnapshot
+Max*.log
+
+# Frozen device build artifacts (the frozen .amxd is shipped via Gumroad, not git)
+# Comment the next line out if you decide to track the device binary in the repo.
+*.amxd
+
+# Ableton rack preset — ships in the Gumroad bundle, not the repo.
+*.adg
+
+# Gumroad packaging staging area (binaries + zip assembled here).
+dist/
+
+# Icon design exploration — galleries, generator, candidate renders all stay
+# local. Only the final assets in icon/ are tracked.
+mockups/glass-icon-*.html
+mockups/build-*.js
+mockups/icon-build/
+
+# Raw icon masters (ChatGPT output) — the tracked size set in icon/ is derived
+# from these via build-banner.py + the resize step. Kept local only.
+icon/imagerevamp.png
+icon/glass-icon.png
