@@ -34,3 +34,12 @@ mockups/icon-build/
 # from these via build-banner.py + the resize step. Kept local only.
 icon/imagerevamp.png
 icon/glass-icon.png
+
+# Archived internal doc — NOTES.md is CLAUDE.md verbatim, renamed by /board-review
+# on 2026-08-17 when the folder went dormant. The rename dodged the CLAUDE.md rule
+# above; the content is the same internal doc, and this repo is eventually-public.
+NOTES.md
+
+# Raw icon master (same class as icon/glass-icon.png above) — the tracked size set
+# in icon/ is derived from it.
+image2.png
