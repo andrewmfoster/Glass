@@ -43,3 +43,6 @@ NOTES.md
 # Raw icon master (same class as icon/glass-icon.png above) — the tracked size set
 # in icon/ is derived from it.
 image2.png
+
+# Audit findings: local only.
+audit/

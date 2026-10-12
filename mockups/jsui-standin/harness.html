@@ -1,0 +1,155 @@
+<!doctype html><meta charset="utf-8">
+<body style="margin:0;background:#141518">
+<canvas id="c"></canvas>
+<script>
+// A stand-in for Max's jsui: mgraphics over Canvas2D. Proves layout and logic, not Max's renderer.
+const Q = new URLSearchParams(location.search);
+const BW = +(Q.get('w') || 705), BH = +(Q.get('h') || 170), REPO = Q.get('repo');
+const LOG = [], CALLS = {}, UNKNOWN = {};
+const NativeImage = window.Image, SPRITES = {};
+const FAIL = (Q.get('fail') || '').split(',');           // method names that throw, to exercise the guards
+function chk(name, args) {
+  CALLS[name] = (CALLS[name] || 0) + 1;
+  if (FAIL.includes(name)) throw new Error(name + ' refused (injected)');
+  for (const a of args) if (typeof a === 'number' && !isFinite(a)) throw new Error('non-finite argument to ' + name);
+}
+function Pattern(make) { this.stops = []; this.make = make; }
+Pattern.prototype.add_color_stop_rgba = function (t, r, g, b, a) {
+  chk('add_color_stop_rgba', arguments); if (t < 0 || t > 1 || a < 0 || a > 1) throw new Error('stop out of range ' + t + ' ' + a);
+  this.stops.push([t, `rgba(${r * 255},${g * 255},${b * 255},${a})`]);
+};
+Pattern.prototype.freepeer = function () { throw new Error('freepeer called on a pattern'); };
+function makeMG(canvas, scale, tag) {
+  const ctx = canvas.getContext('2d');
+  let src = '#000', needBegin = true, cur = [0, 0], tpath = null, font = { face: 'Arial', weight: 400, size: 10 }, depth = 0;
+  const begin = () => { if (needBegin) { ctx.beginPath(); needBegin = false; } };
+  const style = () => {
+    if (src instanceof Pattern) { if (src.dead) return 'rgba(0,0,0,0)'; const g = src.make(ctx); for (const [t, c] of src.stops) g.addColorStop(t, c); return g; }
+    if (src && src.el) return tiled();
+    if (typeof src !== 'string') throw new Error('fill/stroke without a source'); return src;
+  };
+  // Max repeats a surface source across whatever is painted or filled (measured in Live 10-10)
+  const tiled = () => { const p = ctx.createPattern(src.el, 'repeat'); p.setTransform(new DOMMatrix().translate(src.x, src.y)); return p; };
+  const setFont = () => { ctx.font = `${font.weight} ${font.size}px "${font.face}"`; };
+  const useImg = im => { if (!(im instanceof JImage)) throw new Error('not an Image'); if (im.freed) throw new Error('drawing a freed image'); return im.el; };
+  const api = {
+    init() {}, redraw() { if (tag === 'live') schedule(); },
+    _reset() { ctx.setTransform(scale, 0, 0, scale, 0, 0); ctx.globalAlpha = 1; ctx.lineCap = 'butt'; needBegin = true; if (depth) throw new Error('save/restore unbalanced'); },
+    set_source_rgba(r, g, b, a) { src = `rgba(${r * 255},${g * 255},${b * 255},${a})`; },
+    set_source(p) { if (!(p instanceof Pattern)) throw new Error('set_source needs a pattern'); src = p; },
+    set_source_surface(im, x, y) { src = { el: useImg(im), x, y }; },
+    paint_with_alpha(a) { if (!src.el) throw new Error('paint without surface'); ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = tiled(); ctx.fillRect(-1e4, -1e4, 2e4, 2e4); ctx.restore(); },
+    fill_with_alpha(a) { ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = style(); ctx.fill(); ctx.restore(); needBegin = true; tpath = null; },
+    image_surface_draw(im) { ctx.drawImage(useImg(im), 0, 0); },
+    pattern_create_linear(x0, y0, x1, y1) { return new Pattern(c => c.createLinearGradient(x0, y0, x1, y1)); },
+    pattern_create_radial(x0, y0, r0, x1, y1, r1) { const p = new Pattern(c => c.createRadialGradient(x0, y0, r0, x1, y1, r1)); p.dead = tag === 'live'; return p; },   // live: Max draws nothing (measured in Live 10-10)
+    rectangle(x, y, w, h) { begin(); ctx.rect(x, y, w, h); },
+    arc(cx, cy, r, a0, a1) { begin(); ctx.arc(cx, cy, r, a0, a1); },
+    move_to(x, y) { begin(); ctx.moveTo(x, y); cur = [x, y]; },
+    line_to(x, y) { begin(); ctx.lineTo(x, y); },
+    close_path() { ctx.closePath(); },
+    set_line_width(w) { ctx.lineWidth = w; },
+    set_line_cap(m) { if (!['butt', 'round', 'square'].includes(m)) throw new Error('bad cap'); ctx.lineCap = m; },
+    fill() { ctx.fillStyle = style(); ctx.fill(); needBegin = true; tpath = null; },
+    stroke() { api.stroke_preserve(); needBegin = true; tpath = null; },
+    stroke_preserve() { ctx.strokeStyle = style(); if (tpath) { setFont(); ctx.lineJoin = 'round'; ctx.strokeText(tpath[0], tpath[1], tpath[2]); } else ctx.stroke(); },
+    save() { ctx.save(); depth++; }, restore() { ctx.restore(); depth--; },
+    translate(x, y) { ctx.translate(x, y); }, rotate(a) { ctx.rotate(a); }, scale(x, y) { ctx.scale(x, y); },
+    select_font_face(face, slant, weight) { font.face = face; font.weight = weight === 'bold' ? 600 : 400; },   // 600: the mock's weight, so the diff shows layout
+    set_font_size(s) { font.size = s; },
+    text_measure(s) { setFont(); return [ctx.measureText(s).width, font.size]; },
+    show_text(s) { setFont(); ctx.fillStyle = style(); ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left'; ctx.fillText(s, cur[0], cur[1]); },
+    text_path(s) { tpath = [s, cur[0], cur[1]]; }
+  };
+  return new Proxy(api, {
+    get(t, k) {
+      if (k in t) { const v = t[k]; return typeof v === 'function' && k[0] !== '_' ? function () { chk(tag + '.' + k, arguments); return v.apply(t, arguments); } : v; }
+      if (typeof k === 'string') UNKNOWN[k] = (UNKNOWN[k] || 0) + 1; return undefined;
+    },
+    set(t, k, v) { t[k] = v; return true; }
+  });
+}
+function JImage(arg) {
+  if (typeof arg === 'string') { const el = SPRITES[arg]; this.el = el || null; this.size = el ? [el.naturalWidth, el.naturalHeight] : [0, 0]; }
+  else { const c = document.createElement('canvas'); c.width = arg._c.width; c.height = arg._c.height; c.getContext('2d').drawImage(arg._c, 0, 0); this.el = c; this.size = [c.width, c.height]; }
+  this.freed = false; JImage.made++;
+}
+JImage.made = 0; JImage.freedN = 0;
+JImage.prototype.freepeer = function () { if (this.freed) throw new Error('double free'); this.freed = true; JImage.freedN++; };
+window.Image = JImage;
+window.MGraphics = function (w, h) {
+  if (!(w > 0 && h > 0) || w % 1 || h % 1) throw new Error('MGraphics size ' + w + 'x' + h);
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const m = makeMG(c, 1, 'off'); m._c = c; return m;
+};
+const TASKS = [];
+window.Task = function (fn) { this.fn = fn; this.interval = 0; this.running = false; this.id = 0; TASKS.push(this); };
+Task.prototype.schedule = function (ms) { clearTimeout(this.id); this.id = setTimeout(() => this.fn(), ms); };
+Task.prototype.repeat = function () { this.running = true; this.id = setInterval(() => this.fn(), this.interval); };
+Task.prototype.cancel = function () { this.running = false; clearInterval(this.id); clearTimeout(this.id); };
+const LIVE = { vals: (Q.get('vals') || '20,22,90,42,30,6,4,51,100,0,0,0,0,0').split(',').map(p => p * 1.27), sets: 0, inRack: Q.get('norack') === null, late: +(Q.get('latepath') || 0), boom: +(Q.get('boompath') || 0), bpm: 120, sig: [4, 4] };   // ?latepath=n: the device has no path for its first n looks (seen in Max 10-10)
+window.LiveAPI = function (cb, path) {
+  this.cb = cb; this.property = '';
+  if (path === 'this_device' && LIVE.boom-- > 0) throw new Error('Live API is not there yet');   // ?boompath=n: the first n looks throw
+  this.path = path === 'this_device' ? LIVE.late-- > 0 ? undefined : (LIVE.inRack ? '"live_set tracks 0 devices 1 chains 0 devices 0"' : '"live_set tracks 0 devices 1"') : path;
+  const m = /^id (\d+)$/.exec(path); this.slot = m ? +m[1] - 101 : -1;
+};
+LiveAPI.prototype.get = function (k) {
+  if (k === 'parameters') { const a = []; for (let i = 0; i < 17; i++) a.push('id', 100 + i); return a; }
+  return k === 'min' ? [0] : k === 'max' ? [127] : k === 'value' ? [LIVE.vals[this.slot]] : k === 'tempo' ? [LIVE.bpm] : k === 'signature_numerator' ? [LIVE.sig[0]] : k === 'signature_denominator' ? [LIVE.sig[1]] : [];
+};
+LiveAPI.prototype.set = function (k, v) { if (!isFinite(v)) throw new Error('set non-finite'); LIVE.vals[this.slot] = v; LIVE.sets++; };
+window.post = s => LOG.push(s.trim());
+const OX = +(Q.get('ox') || 0), OY = +(Q.get('oy') || 0);   // where the jsui sits in the device's presentation
+window.box = { rect: [10, 20, 10 + BW, 20 + BH], getboxattr: k => k === 'presentation_rect' ? [OX, OY, BW, BH] : undefined };
+window.arrayfromargs = a => Array.prototype.slice.call(a);
+// Max's File over a map of path -> text. ?nofile: nothing opens. ?notrunc: setting eof does not cut a file short.
+// ?nodocs: a write opens and keeps nothing, as Max did for a missing folder (measured in Live 10-10).
+const FILES = {}, FOPS = { reads: 0, writes: 0 };
+if (Q.get('bank')) FILES['~/Documents/GLASS Presets.json'] = Q.get('bank');
+window.File = function (path, mode) {
+  this.path = path; this.mode = mode; this.position = 0; this.void = mode === 'write' && Q.get('nodocs') !== null;
+  this.isopen = Q.get('nofile') === null && (mode === 'write' || path in FILES);
+  if (this.isopen && mode === 'write' && !this.void && !(path in FILES)) FILES[path] = '';
+  FOPS[mode === 'write' ? 'writes' : 'reads']++;
+};
+Object.defineProperty(File.prototype, 'eof', {
+  get() { return (FILES[this.path] || '').length; },
+  set(v) { if (!this.void && Q.get('notrunc') === null) FILES[this.path] = FILES[this.path].slice(0, v); }
+});
+File.prototype.writestring = function (t) { if (this.void) return; const o = FILES[this.path]; FILES[this.path] = o.slice(0, this.position) + t + o.slice(this.position + t.length); this.position += t.length; };
+File.prototype.readstring = function (n) { const t = FILES[this.path].slice(this.position, this.position + n); this.position += t.length; return t; };
+File.prototype.close = function () { this.isopen = false; };
+// the Max text box: records what it is sent. ?nobox: the device has none. ?nobang: bang gives no text.
+// ?latebang: the text arrives after the click that asked for it.
+const NAMEBOX = { maxclass: 'textedit', msgs: [], text: '', hidden: 0, rect: null, focus: false,
+  message(...a) {
+    this.msgs.push(a);
+    if (a[0] === 'set') this.text = String(a[1]);
+    if (a[0] === 'hidden') { this.hidden = a[1]; if (a[1]) this.focus = false; }
+    if (a[0] === 'presentation_rect') this.rect = a.slice(1);
+    if (a[0] === 'patching_rect') this.prect = a.slice(1);
+    if (a[0] === 'select') this.focus = true;
+    if (a[0] === 'bang' && Q.get('nobang') === null) { const t = this.text; if (Q.get('latebang') !== null) setTimeout(() => te0('text', ...t.split(' ')), 20); else te0('text', ...t.split(' ')); }
+  },
+  type(t) { this.text = t; },                                     // the user's typing
+  ret() { te1(13); if (this.text) te0('text', ...this.text.split(' ')); },   // Return: the key first, then the text (the order measured in Live)
+  esc() { te1(27); } };
+// ?mkbox: the device has no box and the patcher lets the script make one (not measured in Max).
+const MADE = [], WIRES = [];
+window.patcher = { getnamed: n => n === 'namebox' && (Q.get('mkbox') !== null ? NAMEBOX.varname === 'namebox' : Q.get('nobox') === null) ? NAMEBOX : null };
+// ?tap: the device holds plugin~ and lets the script patch the level tap (not measured in Max).
+if (Q.get('tap') !== null) patcher.firstobject = { maxclass: 'plugin~', text: 'plugin~', nextobject: null };
+if (Q.get('mkbox') !== null || Q.get('tap') !== null) Object.assign(patcher, {
+  newdefault(x, y, cls, ...a) { MADE.push([x, y, cls, ...a]); return cls === 'textedit' ? NAMEBOX : { maxclass: 'newobj', text: [cls, ...a].join(' '), message() {} }; },
+  connect(s, so, d, di) { WIRES.push([s === NAMEBOX ? 'namebox' : s.text, so, d === box ? 'jsui' : d.text, di]); },
+  bringtofront() {}, remove() {} });
+const canvas = document.getElementById('c'); canvas.width = BW * 2; canvas.height = BH * 2; canvas.style.width = BW * 2 + 'px';
+window.mgraphics = makeMG(canvas, 2, 'live');
+let pending = false; const PAINT_ERR = [];
+function paintNow() { pending = false; mgraphics._reset(); try { paint(); } catch (e) { PAINT_ERR.push(String(e)); } }
+function schedule() { if (!pending) { pending = true; requestAnimationFrame(paintNow); } }
+const names = Q.get('nosprites') !== null ? [] : ['glass-wm-glow', 'glass-wm-tube', 'glass-wm-off', 'glass-neon-glow', 'glass-neon-tube', 'glass-neon-off', 'glass-back-glow'].concat([0, 1, 2, 3, 4, 5, 6].map(i => 'glass-glide-glow-' + i));
+Promise.all(names.map(n => new Promise((ok, no) => { const im = new NativeImage(); im.onload = () => { SPRITES[n + '.png'] = im; ok(); }; im.onerror = no; im.src = 'file://' + REPO + '/sprites/' + n + '.png'; })))
+  .then(() => { const s = document.createElement('script'); s.src = 'file://' + REPO + '/glass.jsui.js'; s.onload = () => { schedule(); window.LOADED = true; }; document.body.appendChild(s); });
+window.onerror = (m) => { PAINT_ERR.push('window: ' + m); };
+</script>

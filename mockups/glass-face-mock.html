@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLASS face mock</title>
+<style>
+  html, body { margin: 0; background: #17181b; color: #9aa0a8; font: 12px/1.4 "Helvetica Neue", Arial, sans-serif; }
+  main { padding: 28px 32px 48px; }
+  h2 { font-size: 11px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: #6f757d; margin: 26px 0 8px; }
+  h2:first-child { margin-top: 0; }
+  canvas { display: block; cursor: default; }
+  #zoom { width: 1410px; height: 340px; }
+  #actual { width: 705px; height: 170px; }
+  .row { display: flex; gap: 28px; align-items: flex-start; }
+  .row img { display: block; }
+  #cur { width: 765px; }
+  #modes { margin-top: 12px; display: flex; gap: 8px; }
+  #modes button { background: #24262b; color: #9aa0a8; border: 1px solid #34373d; border-radius: 4px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  #modes button.on { color: #fff; border-color: #8a9099; }
+  #icon { width: 170px; height: 170px; }
+</style>
+</head>
+<body>
+<main>
+  <h2>2x</h2>
+  <canvas id="zoom" width="1410" height="340"></canvas>
+  <div id="modes"><button data-mode="gen">Generated in device</button><button data-mode="plates">Baked plates</button></div>
+  <h2>Actual size in Live</h2>
+  <div class="row">
+    <canvas id="actual" width="1410" height="340"></canvas>
+    <div><img id="icon" src="../icon/glass-icon-512.png" alt="GLASS icon"></div>
+  </div>
+  <h2>Current device</h2>
+  <img id="cur" src="../screenshots/glass-device.png" alt="Current GLASS device">
+</main>
+
+<script>
+// Everything here is limited to what the jsui can do at runtime:
+//   plates and the wordmark are pre-rendered images (blur allowed, baked once),
+//   knobs, pills and the shard button are plain vector strokes and fills (no blur),
+//   reactivity is an alpha crossfade between a dim plate and a hot plate.
+const W = 705, H = 170, S = 2, PW = W * S, PH = H * S;
+
+function rng(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const WHITE = [255, 255, 255];
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+function hsl(h, s, l) {
+  h = ((h % 360) + 360) % 360 / 360;
+  const q = l < .5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = t => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < .5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return [f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255];
+}
+
+// ---------- plates ----------
+// vec = true keeps to what jsui can draw itself: no blur, no additive blending
+function makeField(pal, seed, vec) {
+  const r = rng(seed), c = mk(PW, PH), g = c.getContext('2d');
+  const pick = () => pal[(r() * pal.length) | 0];
+  g.fillStyle = '#020309'; g.fillRect(0, 0, PW, PH);
+  if (!vec) g.globalCompositeOperation = 'lighter';
+
+  for (let i = 0; i < 10; i++) {                       // colour haze
+    const x = r() * PW, y = r() * PH, rad = 140 + r() * 300, col = pick();
+    const gr = g.createRadialGradient(x, y, 0, x, y, rad);
+    gr.addColorStop(0, rgba(col, .07)); gr.addColorStop(1, rgba(col, 0));
+    g.fillStyle = gr; g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+  }
+
+  for (let i = 0; i < 90; i++) {                       // long streaks across the field
+    const x = r() * PW * 1.4 - PW * .2, y = r() * PH * 1.6 - PH * .3, a = r() * Math.PI, len = 300 + r() * 900;
+    g.strokeStyle = rgba(pick(), .06 + r() * .2); g.lineWidth = .5 + r() * .8;
+    g.beginPath(); g.moveTo(x - Math.cos(a) * len, y - Math.sin(a) * len); g.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len); g.stroke();
+  }
+
+  const nB = 24, bursts = [];
+  for (let i = 0; i < nB; i++) bursts.push({ x: (i + r()) / nB * PW, y: r() * PH, s: .35 + r() * r() * 1.3, col: pick() });
+  for (const b of bursts) {
+    const wedges = 3 + (r() * 5 | 0);                  // refracted shard wedges
+    for (let k = 0; k < wedges; k++) {
+      const a = r() * Math.PI * 2, da = .04 + r() * .22, len = (90 + r() * 330) * b.s, col = r() < .4 ? pick() : b.col;
+      const gr = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, len);
+      gr.addColorStop(0, rgba(col, .24)); gr.addColorStop(1, rgba(col, 0));
+      g.fillStyle = gr; g.beginPath(); g.moveTo(b.x, b.y);
+      g.lineTo(b.x + Math.cos(a) * len, b.y + Math.sin(a) * len);
+      g.lineTo(b.x + Math.cos(a + da) * len, b.y + Math.sin(a + da) * len);
+      g.closePath(); g.fill();
+    }
+    const rays = 40 + (r() * 80 | 0);                  // crack rays
+    for (let k = 0; k < rays; k++) {
+      const a = r() * Math.PI * 2, len = (30 + r() * r() * 520) * b.s, col = r() < .25 ? pick() : b.col;
+      const ex = b.x + Math.cos(a) * len, ey = b.y + Math.sin(a) * len;
+      const gr = g.createLinearGradient(b.x, b.y, ex, ey);
+      gr.addColorStop(0, rgba(mix(col, WHITE, .25), .45)); gr.addColorStop(.12, rgba(col, .62)); gr.addColorStop(1, rgba(col, 0));
+      const lw = .5 + r() * 1.2;
+      if (vec) {                                       // wide faint underlay stands in for bloom
+        const ug = g.createLinearGradient(b.x, b.y, ex, ey);
+        ug.addColorStop(0, rgba(col, .16)); ug.addColorStop(1, rgba(col, 0));
+        g.strokeStyle = ug; g.lineWidth = lw * 5; g.beginPath(); g.moveTo(b.x, b.y); g.lineTo(ex, ey); g.stroke();
+      }
+      g.strokeStyle = gr; g.lineWidth = lw;
+      g.beginPath(); g.moveTo(b.x, b.y); g.lineTo(ex, ey); g.stroke();
+    }
+  }
+  for (const b of bursts) {                            // hot nodes with cross flares
+    const rad = (5 + r() * 12) * b.s;
+    const gr = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, rad);
+    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.22, rgba(b.col, .8)); gr.addColorStop(1, rgba(b.col, 0));
+    g.fillStyle = gr; g.beginPath(); g.arc(b.x, b.y, rad, 0, 7); g.fill();
+    const a0 = r() * Math.PI;
+    for (let k = 0; k < 2; k++) {
+      const a = a0 + k * Math.PI / 2, L = rad * (4 + r() * 4);
+      const x1 = b.x - Math.cos(a) * L, y1 = b.y - Math.sin(a) * L, x2 = b.x + Math.cos(a) * L, y2 = b.y + Math.sin(a) * L;
+      const lg = g.createLinearGradient(x1, y1, x2, y2);
+      lg.addColorStop(0, rgba(b.col, 0)); lg.addColorStop(.5, 'rgba(255,255,255,.85)'); lg.addColorStop(1, rgba(b.col, 0));
+      g.strokeStyle = lg; g.lineWidth = 1; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+    }
+  }
+  for (let i = 0; i < 340; i++) {                      // sparkle dust
+    const x = r() * PW, y = r() * PH, rad = .4 + r() * r() * 2.4, col = r() < .3 ? WHITE : pick();
+    g.fillStyle = rgba(col, .5 + r() * .5); g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill();
+    if (rad > 1.7) {
+      const gr = g.createRadialGradient(x, y, 0, x, y, rad * 6);
+      gr.addColorStop(0, rgba(col, .35)); gr.addColorStop(1, rgba(col, 0));
+      g.fillStyle = gr; g.beginPath(); g.arc(x, y, rad * 6, 0, 7); g.fill();
+    }
+  }
+  return c;
+}
+
+function bloom(src, a1, a2) {
+  const c = mk(PW, PH), g = c.getContext('2d');
+  g.drawImage(src, 0, 0);
+  g.globalCompositeOperation = 'lighter';
+  g.filter = 'blur(5px)'; g.globalAlpha = a1; g.drawImage(src, 0, 0);
+  g.filter = 'blur(20px)'; g.globalAlpha = a2; g.drawImage(src, 0, 0);
+  return c;
+}
+
+function scrim(g) {                                    // calm band behind the knob row (vector, drawn at runtime)
+  const gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, 'rgba(2,3,8,0)'); gr.addColorStop(.24, 'rgba(2,3,8,0)');
+  gr.addColorStop(.38, 'rgba(2,3,8,.6)'); gr.addColorStop(1, 'rgba(2,3,8,.72)');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+}
+
+function makePlates(pal, seed, vec) {
+  const field = makeField(pal, seed, vec);
+  if (vec) return { dim: field, gen: true };
+  const dim = mk(PW, PH), dg = dim.getContext('2d');
+  dg.fillStyle = '#020309'; dg.fillRect(0, 0, PW, PH);
+  dg.globalAlpha = .82; dg.drawImage(bloom(field, .35, .25), 0, 0); dg.globalAlpha = 1;
+  const hot = bloom(field, .5, .5);
+  return { dim, hot };
+}
+
+// ---------- wordmark sprite ----------
+const PAD = 110;
+let sprite = null, spriteW = 0;
+// Letterforms measured off 3x crops of the icon (icon/glass-icon-1024.png), in icon pixels,
+// 780 x 136 outer. Each letter is a 32px band with squared ends; a 10px white tube runs along
+// both edges of the band with a 12px red core between. Where the icon's tube does not close
+// (top of the L, the L's foot into the A, the first S's lower-left end) the core runs to the end.
+const WM = { w: 780, h: 136, T: 32, tube: 10 };
+function sLetter(x0, openFoot) {
+  return { ends: [[x0 + 150, 16, 1], [x0 + 4, 120, -1]], path: (g, d) => {
+    g.moveTo(x0 + 150 - d, 16); g.lineTo(x0 + 42, 16);
+    g.arc(x0 + 42, 42, 26, -Math.PI / 2, Math.PI / 2, true);
+    g.lineTo(x0 + 108, 68);
+    g.arc(x0 + 108, 94, 26, -Math.PI / 2, Math.PI / 2, false);
+    g.lineTo(x0 + 4 + (openFoot && d === WM.tube ? 0 : d), 120);
+  } };
+}
+const WM_LETTERS = [
+  { ends: [[180, 16, 1], [92, 76.5, -1]], path: (g, d) => {   // G: arm sits below centre, as in the icon
+    g.moveTo(180 - d, 16); g.arcTo(16, 16, 16, 68, 39); g.arcTo(16, 120, 70, 120, 39);
+    g.arcTo(164, 120, 164, 76.5, 20); g.arcTo(164, 76.5, 100, 76.5, 14); g.lineTo(92 + d, 76.5);
+  } },
+  { path: (g, d) => { g.moveTo(209, 2); g.arcTo(209, 120, 240, 120, 8); g.lineTo(300, 120); } },   // L: open top, foot open into the A
+  { clip: true,                                        // A: legs run past the baseline and are cut flat
+    path: (g, d) => { g.moveTo(297.8, 150); g.arcTo(379.5, -2, 461.2, 150, 21); g.lineTo(461.2, 150); },
+    bar: (g, d) => { g.moveTo(338 + d * 1.4, 81); g.lineTo(421 - d * 1.4, 81); } },
+  sLetter(470, true), sLetter(630, false)
+];
+function makeSprite() {
+  const k = 84 / WM.h;                                 // 84px tall at 2x = 42pt in the device
+  spriteW = Math.round(WM.w * k);
+  const c = mk(spriteW + PAD * 2, Math.round(WM.h * k) + PAD * 2), g = c.getContext('2d');
+  // layer: 0 red glow source, 1 white band, 2 red core, 3 orange glow source (hugs the tube)
+  const letter = (ctx, L, layer) => {
+    const d = layer === 2 ? WM.tube : layer === 1 ? 6 : 0, grow = layer === 0 ? 6 : layer === 3 ? 3 : 0;   // white band stops 6 short, then gets a small-radius end cap
+    ctx.save(); ctx.translate(PAD, PAD); ctx.scale(k, k); ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+    if (L.clip) { ctx.beginPath(); ctx.rect(-60, -grow, WM.w + 120, WM.h - (layer === 2 ? WM.tube : 0) + grow * 2); ctx.clip(); }
+    ctx.strokeStyle = layer === 0 ? '#ff2c02' : layer === 3 ? '#ff7a22' : layer === 1 ? '#fffcf5' : '#fa3a0a';
+    ctx.beginPath(); L.path(ctx, d); ctx.lineWidth = WM.T - (layer === 2 ? WM.tube * 2 : 0) + grow; ctx.stroke();
+    if (layer === 1 && L.ends) for (const [ex, ey, dir] of L.ends) {
+      ctx.fillStyle = ctx.strokeStyle; ctx.beginPath();
+      ctx.roundRect(dir > 0 ? ex - 13 : ex, ey - WM.T / 2, 13, WM.T, dir > 0 ? [0, 7, 7, 0] : [7, 0, 0, 7]); ctx.fill();
+    }
+    if (L.bar) { ctx.beginPath(); L.bar(ctx, d); ctx.lineWidth = layer === 2 ? 5 : 20 + grow; ctx.stroke(); }
+    ctx.restore();
+  };
+  const t = mk(c.width, c.height), tg = t.getContext('2d');   // glow source, blurred in so it falls off cleanly
+  WM_LETTERS.forEach(L => letter(tg, L, 0));
+  const t2 = mk(c.width, c.height), tg2 = t2.getContext('2d');
+  WM_LETTERS.forEach(L => letter(tg2, L, 3));
+  // nothing drawn sharp outside the white: every layer is blurred, widest and reddest first
+  g.filter = 'blur(38px)'; g.globalAlpha = .4; g.drawImage(t, 0, 0);
+  g.filter = 'blur(20px)'; g.globalAlpha = .6; g.drawImage(t, 0, 0);
+  g.filter = 'blur(9px)'; g.globalAlpha = .85; g.drawImage(t, 0, 0);
+  g.filter = 'blur(3.5px)'; g.globalAlpha = .9; g.drawImage(t2, 0, 0);
+  g.filter = 'none'; g.globalAlpha = 1;
+  WM_LETTERS.forEach(L => letter(g, L, 1));
+  WM_LETTERS.forEach(L => letter(g, L, 2));
+  sprite = c;
+}
+
+// ---------- shatter shard sprite ----------
+const SPAD = 28, SHW = 104, SHH = 32;
+const SHPTS = [[0, .44], [.09, .03], [.5, 0], [.94, .12], [1, .6], [.85, 1], [.38, .94], [.06, .88]];
+const SHHIT = [.2, .4];                                // impact point the cracks run from
+function makeShard(hot) {
+  const c = mk((SHW + SPAD) * S, (SHH + SPAD) * S), g = c.getContext('2d');
+  g.scale(S, S); g.translate(SPAD / 2, SPAD / 2);
+  const P = SHPTS.map(p => [p[0] * SHW, p[1] * SHH]), ix = SHHIT[0] * SHW, iy = SHHIT[1] * SHH;
+  const path = (dx) => { g.beginPath(); P.forEach((p, i) => i ? g.lineTo(p[0] + dx, p[1]) : g.moveTo(p[0] + dx, p[1])); g.closePath(); };
+  path(0);
+  const body = g.createLinearGradient(0, 0, SHW, SHH);
+  body.addColorStop(0, hot ? 'rgba(34,44,66,.9)' : 'rgba(14,18,30,.88)'); body.addColorStop(1, 'rgba(4,6,11,.9)');
+  g.fillStyle = body; g.fill();
+  const tints = [[255, 80, 60], [90, 225, 245], [255, 255, 255], [150, 110, 255], [255, 190, 90], [90, 225, 245], [255, 80, 150], [255, 255, 255]];
+  for (let i = 0; i < P.length; i++) {                  // facets fanning from the impact point
+    const a = P[i], b = P[(i + 1) % P.length];
+    const gr = g.createLinearGradient(ix, iy, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    gr.addColorStop(0, rgba(tints[i], 0)); gr.addColorStop(1, rgba(tints[i], (i % 2 ? .1 : .24) * (hot ? 1.7 : 1)));
+    g.fillStyle = gr; g.beginPath(); g.moveTo(ix, iy); g.lineTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.closePath(); g.fill();
+    g.strokeStyle = `rgba(225,238,255,${hot ? .4 : .22})`; g.lineWidth = .5;
+    g.beginPath(); g.moveTo(ix, iy); g.lineTo(a[0], a[1]); g.stroke();
+  }
+  g.globalCompositeOperation = 'lighter'; g.lineJoin = 'round';
+  g.shadowColor = 'rgba(120,200,255,.9)'; g.shadowBlur = hot ? 14 : 8;
+  g.lineWidth = 1.2; path(-.9); g.strokeStyle = 'rgba(70,225,255,.8)'; g.stroke();   // split rim: cyan / red / white core
+  g.shadowColor = 'rgba(255,70,50,.9)'; path(.9); g.strokeStyle = 'rgba(255,70,55,.8)'; g.stroke();
+  g.shadowBlur = 0; g.lineWidth = .9; path(0); g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
+  const glint = g.createRadialGradient(ix, iy, 0, ix, iy, hot ? 13 : 9);
+  glint.addColorStop(0, 'rgba(255,255,255,1)'); glint.addColorStop(.3, 'rgba(160,220,255,.5)'); glint.addColorStop(1, 'rgba(160,220,255,0)');
+  g.fillStyle = glint; g.beginPath(); g.arc(ix, iy, 14, 0, 7); g.fill();
+  return c;
+}
+let shards = [];
+
+// ---------- state ----------
+const KNOBS = [
+  { label: 'REFLECT', macro: 0, color: [237, 94, 69] },
+  { label: 'VERB',    macro: 7, color: [242, 138, 77] },
+  { label: 'DELAY',   macro: 1, color: [252, 196, 107] },
+  { label: 'ECHO %',  macro: 2, color: [94, 212, 201] },
+  { label: 'ECHO T',  macro: 3, color: [71, 184, 217] },
+  { label: 'WAVY',    macro: 4, color: [102, 148, 235] },
+  { label: 'WOBBLE',  macro: 5, color: [163, 87, 201] },
+  { label: 'COMP',    macro: 6, color: [219, 87, 158] }
+];
+const PRESETS = [
+  { name: 'MIDNIGHT', vals: [82, 68, 69, 65, 64, 64, 0, 41], accent: [77, 140, 242],
+    pal: [[60, 110, 255], [90, 80, 240], [40, 170, 255], [130, 110, 255], [90, 200, 255]], seed: 211 },
+  { name: 'ANGELS', vals: [127, 75.2, 49.96, 52.93, 78.83, 53.06, 43, 97.3], accent: [209, 143, 245],
+    pal: [[255, 130, 200], [255, 200, 120], [200, 150, 255], [255, 170, 90], [255, 80, 150]], seed: 322 },
+  { name: 'GHOSTS', vals: [45.94, 16.37, 80, 66.45, 107.79, 35, 110, 80.56], accent: [102, 219, 153],
+    pal: [[70, 240, 160], [50, 210, 200], [140, 255, 170], [40, 180, 220], [120, 255, 210]], seed: 433 }
+];
+const ICON_PAL = [[255, 60, 40], [255, 140, 50], [255, 200, 90], [60, 220, 230], [70, 120, 255], [240, 70, 170], [150, 90, 255]];
+const POOL = 12, pool = [];
+let lastPool = -1, flip = [1, 1];
+// macro index order, 0..127, seeded from the device screenshot
+let vals = [20, 22, 90, 42, 30, 6, 4, 51].map(p => p * 1.27);
+let active = -1, plates = null, energy = 0, hover = { knob: -1, preset: -1, shatter: false }, drag = null;
+
+const A0 = Math.PI * .75, SWEEP = Math.PI * 1.5;
+const CELL = (W - 40) / 8, KY = 122, KR = 20;
+const kx = i => 20 + CELL * (i + .5);
+const PILL = { w: 92, h: 30, gap: 8, y: 14 };
+const pillX = p => W - 14 - (3 - p) * PILL.w - (2 - p) * PILL.gap;
+let titleRight = 230;
+const shardRect = () => { const x0 = titleRight + 14, x1 = pillX(0) - 14, w = Math.min(104, x1 - x0); return [x0 + (x1 - x0 - w) / 2, 13, w, 32]; };
+
+function draw(g) {
+  g.setTransform(S, 0, 0, S, 0, 0);
+  g.save(); g.translate(flip[0] < 0 ? W : 0, flip[1] < 0 ? H : 0); g.scale(flip[0], flip[1]);
+  if (plates.gen) { g.fillStyle = '#020309'; g.fillRect(0, 0, W, H); g.globalAlpha = .55 + .45 * energy; g.drawImage(plates.dim, 0, 0, W, H); }
+  else { g.globalAlpha = 1; g.drawImage(plates.dim, 0, 0, W, H); g.globalAlpha = energy; g.drawImage(plates.hot, 0, 0, W, H); }
+  g.globalAlpha = 1;
+  g.restore(); scrim(g);
+
+  const sw = sprite.width / S, sh = sprite.height / S;
+  g.drawImage(sprite, 16 - PAD / S, 30 - sh / 2, sw, sh);
+  titleRight = 16 + spriteW / S;
+
+  // SHATTER shard (baked sprite, rest + hover)
+  const [sx, sy, sW, sH] = shardRect();
+  g.drawImage(shards[hover.shatter ? 1 : 0], sx - SPAD / S, sy - SPAD / S, sW + SPAD, sH + SPAD);
+  text(g, 'SHATTER', sx + sW / 2 + 3, sy + sH / 2 + .5, '600 10.5px "Helvetica Neue", Arial', '#fff', 1.6);
+
+  // preset pills
+  for (let p = 0; p < 3; p++) {
+    const x = pillX(p), P = PRESETS[p], on = active === p, hv = hover.preset === p;
+    rr(g, x, PILL.y, PILL.w, PILL.h, 5);
+    g.fillStyle = on ? rgba(mix([6, 8, 13], P.accent, .2), .84) : hv ? 'rgba(26,31,42,.8)' : 'rgba(6,8,13,.7)'; g.fill();
+    g.strokeStyle = on ? rgba(P.accent, .95) : hv ? 'rgba(220,230,250,.5)' : 'rgba(255,255,255,.16)'; g.lineWidth = 1; g.stroke();
+    text(g, P.name, x + PILL.w / 2, PILL.y + 12.5, '500 10.5px "Helvetica Neue", Arial', on ? '#fff' : 'rgba(205,212,224,.82)', 1.2);
+    g.strokeStyle = rgba(P.accent, on ? 1 : .7); g.lineWidth = on ? 2 : 1.5; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(x + PILL.w / 2 - 15, PILL.y + 23); g.lineTo(x + PILL.w / 2 + 15, PILL.y + 23); g.stroke();
+  }
+
+  // knobs
+  for (let i = 0; i < 8; i++) {
+    const k = KNOBS[i], cx = kx(i), f = vals[k.macro] / 127, hot = hover.knob === i || (drag && drag.knob === i);
+    const halo = g.createRadialGradient(cx, KY, KR * .6, cx, KY, KR + 26);
+    halo.addColorStop(0, 'rgba(2,3,8,.6)'); halo.addColorStop(1, 'rgba(2,3,8,0)');
+    g.fillStyle = halo; g.beginPath(); g.arc(cx, KY, KR + 26, 0, 7); g.fill();
+
+    text(g, k.label, cx, 74, '500 10.5px "Helvetica Neue", Arial', hot ? '#fff' : 'rgba(205,212,224,.82)', 1.1);
+
+    g.lineCap = 'butt';
+    g.strokeStyle = 'rgba(130,142,165,.26)'; g.lineWidth = 3;
+    g.beginPath(); g.arc(cx, KY, KR + 7, A0, A0 + SWEEP); g.stroke();
+    if (f > .004) {                                    // stacked strokes stand in for glow
+      const a1 = A0 + SWEEP * f, col = mix(k.color, WHITE, f * .35);
+      [[11, .10], [7.5, .2], [3.4, 1]].forEach(([w, a]) => {
+        g.strokeStyle = rgba(col, a * (.6 + .4 * f) * (hot && a < 1 ? 1.6 : 1)); g.lineWidth = w;
+        g.beginPath(); g.arc(cx, KY, KR + 7, A0, a1); g.stroke();
+      });
+      g.strokeStyle = `rgba(255,255,255,${.25 + .5 * f})`; g.lineWidth = 1;
+      g.beginPath(); g.arc(cx, KY, KR + 7, A0, a1); g.stroke();
+    }
+
+    const body = g.createRadialGradient(cx - 7, KY - 9, 2, cx, KY, KR);
+    body.addColorStop(0, rgba(mix([52, 57, 68], k.color, .12 + f * .2), 1)); body.addColorStop(1, 'rgba(9,11,15,1)');
+    g.fillStyle = body; g.beginPath(); g.arc(cx, KY, KR, 0, 7); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,.1)'; g.lineWidth = 1; g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,.32)'; g.lineWidth = 1;
+    g.beginPath(); g.arc(cx, KY, KR - .5, Math.PI * 1.12, Math.PI * 1.62); g.stroke();
+
+    const a = A0 + SWEEP * f;
+    g.strokeStyle = 'rgba(240,244,250,.95)'; g.lineWidth = 2.4; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * KR * .38, KY + Math.sin(a) * KR * .38); g.lineTo(cx + Math.cos(a) * KR * .8, KY + Math.sin(a) * KR * .8); g.stroke();
+
+    text(g, Math.round(f * 100) + '%', cx, 161, '500 11.5px "Helvetica Neue", Arial', rgba(mix(k.color, WHITE, .12), 1), .3);
+  }
+}
+function text(g, s, x, y, font, fill, ls) {
+  g.font = font; g.letterSpacing = ls + 'px'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = fill;
+  g.fillText(s, x + ls / 2, y);
+}
+function rr(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, w, h, r); }
+
+// ---------- loop ----------
+const zoom = document.getElementById('zoom'), actual = document.getElementById('actual');
+const zg = zoom.getContext('2d'), ag = actual.getContext('2d');
+let raf = 0;
+const target = () => vals.reduce((a, b) => a + b, 0) / 8 / 127;
+function frame() {
+  raf = 0;
+  const t = target(); energy += (t - energy) * .16;
+  if (Math.abs(t - energy) < .002) energy = t; else kick();
+  draw(zg);
+  ag.setTransform(1, 0, 0, 1, 0, 0); ag.drawImage(zoom, 0, 0);
+}
+function kick() { if (!raf) raf = requestAnimationFrame(frame); }
+
+function pt(e) { const b = e.currentTarget.getBoundingClientRect(); return [(e.clientX - b.left) * W / b.width, (e.clientY - b.top) * H / b.height]; }
+function hit(x, y) {
+  for (let i = 0; i < 8; i++) if (Math.hypot(x - kx(i), y - KY) < KR + 12) return { knob: i };
+  for (let p = 0; p < 3; p++) { const px = pillX(p); if (x >= px && x <= px + PILL.w && y >= PILL.y && y <= PILL.y + PILL.h) return { preset: p }; }
+  const [sx, sy, sW, sH] = shardRect(); if (x >= sx && x <= sx + sW && y >= sy && y <= sy + sH) return { shatter: true };
+  return {};
+}
+const palFromHue = h => [hsl(h, 1, .6), hsl(h + 28, 1, .62), hsl(h + 150, .95, .6), hsl(h + 185, 1, .6), hsl(h + 215, .9, .65), hsl(h + 320, 1, .62)];
+function shatter() {
+  active = -1;
+  if (mode === 'gen') {                                // fresh palette and geometry every hit
+    plates = makePlates(palFromHue(Math.random() * 360), (Math.random() * 1e9) | 0, true); flip = [1, 1];
+  } else {
+    let i; do { i = (Math.random() * POOL) | 0; } while (i === lastPool); lastPool = i;
+    if (!pool[i]) pool[i] = makePlates(palFromHue(rng(9000 + i * 77)() * 360), 5000 + i * 131);
+    plates = pool[i];
+    flip = [Math.random() < .5 ? -1 : 1, Math.random() < .5 ? -1 : 1];
+  }
+  vals = vals.map(() => Math.random() * 127);
+}
+let mode = 'gen';
+const base = {};
+function pickPlates() { const src = active >= 0 ? PRESETS[active] : base; plates = mode === 'gen' ? src.gen : src.plates; flip = [1, 1]; }
+function setMode(m) {
+  mode = m; pickPlates();
+  document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+  kick();
+}
+for (const c of [zoom, actual]) {
+  c.addEventListener('mousedown', e => {
+    const [x, y] = pt(e), h = hit(x, y);
+    if (h.knob !== undefined) drag = { knob: h.knob, y: e.clientY };
+    else if (h.preset !== undefined) { active = h.preset; vals = PRESETS[active].vals.slice(); pickPlates(); }
+    else if (h.shatter) shatter();
+    kick();
+  });
+  c.addEventListener('mousemove', e => {
+    if (drag) return;
+    const [x, y] = pt(e), h = hit(x, y);
+    hover = { knob: h.knob ?? -1, preset: h.preset ?? -1, shatter: !!h.shatter };
+    c.style.cursor = (h.knob !== undefined) ? 'ns-resize' : (h.preset !== undefined || h.shatter) ? 'pointer' : 'default';
+    kick();
+  });
+  c.addEventListener('mouseleave', () => { if (!drag) { hover = { knob: -1, preset: -1, shatter: false }; kick(); } });
+}
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const m = KNOBS[drag.knob].macro;
+  vals[m] = Math.max(0, Math.min(127, vals[m] + (drag.y - e.clientY) * .7)); drag.y = e.clientY;
+  active = -1; kick();
+});
+window.addEventListener('mouseup', () => { drag = null; kick(); });
+
+(async function boot() {
+  makeSprite(); shards = [makeShard(false), makeShard(true)];
+  for (const P of PRESETS) { P.plates = makePlates(P.pal, P.seed); P.gen = makePlates(P.pal, P.seed, true); }
+  base.plates = makePlates(ICON_PAL, 108); base.gen = makePlates(ICON_PAL, 108, true);
+  const qs = new URLSearchParams(location.search);
+  document.querySelectorAll('#modes button').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  const q = new URLSearchParams(location.search).get('preset');   // ?preset=0..2 for stills
+  if (q !== null && PRESETS[+q]) { active = +q; vals = PRESETS[active].vals.slice(); }
+  setMode(qs.get('mode') === 'plates' ? 'plates' : 'gen');
+  energy = target();
+  cancelAnimationFrame(raf); frame();
+  if (qs.get('export')) {                              // sprite PNGs for the device, read back via --dump-dom
+    const pre = document.createElement('pre'); pre.id = 'export';
+    pre.textContent = JSON.stringify({ wordmark: sprite.toDataURL(), shard: shards[0].toDataURL(), shardHot: shards[1].toDataURL(), spriteW, PAD });
+    document.body.appendChild(pre);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLASS face sampler</title>
+<style>
+  html, body { margin: 0; background: #141518; color: #9aa0a8; font: 12px/1.45 "Helvetica Neue", Arial, sans-serif; }
+  main { padding: 28px 32px 64px; width: 1410px; }
+  .top { display: flex; justify-content: space-between; align-items: flex-end; gap: 32px; }
+  .top p { margin: 0; max-width: 780px; color: #8a9099; font-size: 13px; }
+  .top img { width: 104px; height: 104px; display: block; }
+  section { margin-top: 36px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #c9ced6; margin: 0 0 3px; }
+  .tag { color: #7b828c; margin: 0 0 10px; max-width: 980px; }
+  canvas { display: block; }
+  canvas.z { width: 1410px; height: 340px; }
+  canvas.a { width: 705px; height: 170px; }
+  .cap { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #5f656d; margin: 12px 0 6px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <p>Five faces at the device's real footprint, 705 x 170. One shared state: a preset, a knob or SHATTER on any face drives all five. Every SHATTER draws a new field from a fresh palette and fresh geometry, on every face.</p>
+    <img src="../icon/glass-icon-512.png" alt="GLASS icon">
+  </div>
+  <div id="faces"></div>
+</main>
+
+<script>
+// Same rule as glass-face-mock.html: nothing here goes past what the jsui can do at runtime.
+//   BAKED (drawn once offline, blur allowed, shipped as PNG): wordmark, shard, knob caps, pane shadow and grain.
+//   LIVE (plain strokes, fills and gradients, no blur, no additive blending): the shatter field,
+//   arcs, pointers, pills, rims. The field is rendered once per SHATTER into an offscreen image.
+const W = 705, H = 170, S = 2, PW = W * S, PH = H * S;
+
+function rng(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const WHITE = [255, 255, 255];
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.ceil(w); c.height = Math.ceil(h); return c; }
+function hsl(h, s, l) {
+  h = ((h % 360) + 360) % 360 / 360;
+  const q = l < .5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = t => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < .5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return [f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255];
+}
+function radial(g, x, y, rad, stops) {
+  const gr = g.createRadialGradient(x, y, 0, x, y, rad);
+  for (const [t, c, a] of stops) gr.addColorStop(t, rgba(c, a));
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill();
+}
+function fade(g, x0, y0, x1, y1, stops, lw) {            // a stroke whose alpha runs along its length
+  const gr = g.createLinearGradient(x0, y0, x1, y1);
+  for (const [t, c, a] of stops) gr.addColorStop(t, rgba(c, a));
+  g.strokeStyle = gr; g.lineWidth = lw; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+}
+function arc(g, cx, cy, r, a0, a1, w, style, cap) { g.strokeStyle = style; g.lineWidth = w; g.lineCap = cap || 'butt'; g.beginPath(); g.arc(cx, cy, r, a0, a1); g.stroke(); }
+function rr(g, x, y, w, h, r) { g.beginPath(); g.roundRect(x, y, w, h, r); }
+function text(g, s, x, y, font, fill, ls) {
+  g.font = font; g.letterSpacing = ls + 'px'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = fill;
+  g.fillText(s, x + ls / 2, y);
+}
+
+// ---------- the shatter field ----------
+// Geometry first (so one SHATTER can be drawn sharp and soft from the same hit), then renderers.
+function makeGeo(pal, seed) {
+  const r = rng(seed), pick = () => pal[(r() * pal.length) | 0];
+  const geo = { pal, seed, haze: [], lines: [], bursts: [], dust: [] };
+  for (let i = 0; i < 16; i++) geo.haze.push({ x: r() * W, y: r() * H, rad: 60 + r() * 170, col: pick(), a: .1 + r() * .14 });
+  const nB = 28;
+  for (let i = 0; i < nB; i++) {
+    const big = r() < .2, s = big ? .8 + r() * .7 : .22 + r() * r() * .62, col = pick();
+    const b = { x: (i + r()) / nB * W, y: r() * H, s, col, big, rays: [], wedges: [], spikeA: r() * Math.PI }, dirs = [];
+    for (let k = 3 + (r() * 5 | 0); k--;) dirs.push(r() * 7);   // most rays gather into a few sprays, as on the icon
+    for (let k = 3 + (r() * 5 | 0); k--;) b.wedges.push({ a: r() * 7, da: .04 + r() * .2, len: (40 + r() * 150) * s, col: r() < .4 ? pick() : col });
+    for (let k = 40 + (r() * 74 | 0); k--;) {
+      const spray = r() < .72, a = spray ? dirs[(r() * dirs.length) | 0] + (r() - r()) * .2 : r() * 7;
+      b.rays.push({ a, len: (14 + r() * r() * (spray ? 310 : 170)) * s, col: r() < .25 ? pick() : col, lw: .25 + r() * .55 });
+    }
+    geo.bursts.push(b);
+  }
+  for (let i = 0; i < 40; i++) {                         // fractures through pairs of bursts, running past both
+    const a = geo.bursts[(r() * nB) | 0], b = geo.bursts[(r() * nB) | 0], e0 = .2 + r() * 1.2, e1 = .2 + r() * 1.2;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    if (a !== b) geo.lines.push({ x0: a.x - dx * e0, y0: a.y - dy * e0, x1: b.x + dx * e1, y1: b.y + dy * e1, col: r() < .5 ? a.col : pick(), a: .1 + r() * .26, lw: .25 + r() * .4 });
+  }
+  for (let i = 0; i < 70; i++) {                         // fractures at any angle, most through a burst
+    const b = geo.bursts[(r() * nB) | 0], onB = r() < .7, x = onB ? b.x : r() * W, y = onB ? b.y : r() * H, a = r() * Math.PI, l0 = 40 + r() * 380, l1 = 40 + r() * 380;
+    geo.lines.push({ x0: x - Math.cos(a) * l0, y0: y - Math.sin(a) * l0, x1: x + Math.cos(a) * l1, y1: y + Math.sin(a) * l1, col: onB && r() < .6 ? b.col : pick(), a: .07 + r() * .22, lw: .25 + r() * .4 });
+  }
+  for (let i = 0; i < 560; i++) geo.dust.push({ x: r() * W, y: r() * H, rad: .2 + r() * r() * 1.25, col: r() < .3 ? WHITE : pick(), a: .45 + r() * .55 });
+  return geo;
+}
+function drawBurst(g, b, k) {
+  radial(g, b.x, b.y, 22 + 62 * b.s, [[0, b.col, .36 * k], [.3, b.col, .13 * k], [1, b.col, 0]]);   // stands in for bloom
+  for (const w of b.wedges) {                            // refracted shard wedges
+    const gr = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, w.len);
+    gr.addColorStop(0, rgba(w.col, .26 * k)); gr.addColorStop(1, rgba(w.col, 0));
+    g.fillStyle = gr; g.beginPath(); g.moveTo(b.x, b.y);
+    g.lineTo(b.x + Math.cos(w.a) * w.len, b.y + Math.sin(w.a) * w.len);
+    g.lineTo(b.x + Math.cos(w.a + w.da) * w.len, b.y + Math.sin(w.a + w.da) * w.len);
+    g.closePath(); g.fill();
+  }
+  for (const y of b.rays) {                              // crack rays, each over a wide faint underlay
+    const ex = b.x + Math.cos(y.a) * y.len, ey = b.y + Math.sin(y.a) * y.len;
+    fade(g, b.x, b.y, ex, ey, [[0, y.col, .15 * k], [1, y.col, 0]], y.lw * 4.5);
+    fade(g, b.x, b.y, ex, ey, [[0, mix(y.col, WHITE, .3), .55 * k], [.12, y.col, .7 * k], [1, y.col, 0]], y.lw);
+  }
+}
+function drawCore(g, b, k) {                             // hot node with cross flares
+  const rad = (2.6 + 5.4 * b.s);
+  radial(g, b.x, b.y, rad * 2.6, [[0, mix(b.col, WHITE, .5), .55 * k], [1, b.col, 0]]);
+  radial(g, b.x, b.y, rad, [[0, WHITE, k], [.3, mix(b.col, WHITE, .55), .85 * k], [1, b.col, 0]]);
+  for (let j = 0, n = b.big ? 3 : 2; j < n; j++) {
+    const a = b.spikeA + j * Math.PI / n, L = rad * (4.5 + (b.big ? 3 : 1.5));
+    fade(g, b.x - Math.cos(a) * L, b.y - Math.sin(a) * L, b.x + Math.cos(a) * L, b.y + Math.sin(a) * L, [[0, b.col, 0], [.5, WHITE, .9 * k], [1, b.col, 0]], .6);
+  }
+}
+function renderField(geo, o = {}) {
+  const c = mk(PW, PH), g = c.getContext('2d'); g.scale(S, S);
+  g.fillStyle = o.bg || '#020309'; g.fillRect(0, 0, W, H);
+  const hz = o.haze ?? 1, ln = o.lines ?? 1, bu = o.bursts ?? 1, du = o.dust ?? 1;
+  if (hz) for (const h of geo.haze) radial(g, h.x, h.y, h.rad, [[0, h.col, h.a * hz], [1, h.col, 0]]);
+  if (ln) for (const l of geo.lines) { g.strokeStyle = rgba(l.col, l.a * ln); g.lineWidth = l.lw; g.beginPath(); g.moveTo(l.x0, l.y0); g.lineTo(l.x1, l.y1); g.stroke(); }
+  if (bu) { for (const b of geo.bursts) drawBurst(g, b, bu); for (const b of geo.bursts) drawCore(g, b, bu); }
+  if (du) for (const d of geo.dust) {
+    g.fillStyle = rgba(d.col, d.a * du); g.beginPath(); g.arc(d.x, d.y, d.rad, 0, 7); g.fill();
+    if (d.rad > .9) radial(g, d.x, d.y, d.rad * 6, [[0, d.col, .32 * du], [1, d.col, 0]]);
+  }
+  return c;
+}
+function renderSoft(geo) {                               // the same hit seen through frosted glass: gradients only
+  const c = mk(PW, PH), g = c.getContext('2d'); g.scale(S, S);
+  g.fillStyle = '#020309'; g.fillRect(0, 0, W, H);
+  for (const h of geo.haze) radial(g, h.x, h.y, h.rad * 1.2, [[0, h.col, h.a * 1.7], [1, h.col, 0]]);
+  for (const b of geo.bursts) radial(g, b.x, b.y, 34 + 84 * b.s, [[0, mix(b.col, WHITE, .25), .5], [.35, b.col, .2], [1, b.col, 0]]);
+  return c;
+}
+const BR = 92;
+function renderKnobBurst(col, pal, seed) {               // one burst on its own, for the face where each knob lights one
+  const r = rng(seed), pick = () => r() < .65 ? col : pal[(r() * pal.length) | 0];
+  const c = mk(BR * 2 * S, BR * 2 * S), g = c.getContext('2d'); g.scale(S, S);
+  const b = { x: BR, y: BR, s: 1, col, big: true, rays: [], wedges: [], spikeA: r() * Math.PI }, dirs = [];
+  for (let k = 4 + (r() * 4 | 0); k--;) dirs.push(r() * 7);
+  for (let k = 5 + (r() * 4 | 0); k--;) b.wedges.push({ a: r() * 7, da: .05 + r() * .22, len: 40 + r() * 50, col: pick() });
+  for (let k = 130; k--;) b.rays.push({ a: r() < .7 ? dirs[(r() * dirs.length) | 0] + (r() - r()) * .22 : r() * 7, len: 24 + r() * r() * 66, col: pick(), lw: .25 + r() * .55 });
+  radial(g, BR, BR, BR, [[0, col, .36], [.4, col, .12], [1, col, 0]]);
+  drawBurst(g, b, 1.3); drawCore(g, b, 1);
+  for (let i = 0; i < 46; i++) { const a = r() * 7, d = 14 + r() * 70, rad = .25 + r() * r() * 1.1; g.fillStyle = rgba(r() < .3 ? WHITE : pick(), (.4 + r() * .6) * (1 - d / BR)); g.beginPath(); g.arc(BR + Math.cos(a) * d, BR + Math.sin(a) * d, rad, 0, 7); g.fill(); }
+  return c;
+}
+
+// ---------- wordmark sprites (baked) ----------
+// Letterforms measured off 3x crops of the icon (icon/glass-icon-1024.png), in icon pixels,
+// 780 x 136 outer. Each letter is a 32px band with squared ends; a 10px white tube runs along
+// both edges of the band with a 12px red core between. Where the icon's tube does not close
+// (top of the L, the L's foot into the A, the first S's lower-left end) the core runs to the end.
+const WM = { w: 780, h: 136, T: 32, tube: 10 }, PAD = 110, WMH = 44;
+function sLetter(x0, openFoot) {
+  return { ends: [[x0 + 150, 16, 1], [x0 + 4, 120, -1]], path: (g, d) => {
+    g.moveTo(x0 + 150 - d, 16); g.lineTo(x0 + 42, 16);
+    g.arc(x0 + 42, 42, 26, -Math.PI / 2, Math.PI / 2, true);
+    g.lineTo(x0 + 108, 68);
+    g.arc(x0 + 108, 94, 26, -Math.PI / 2, Math.PI / 2, false);
+    g.lineTo(x0 + 4 + (openFoot && d === WM.tube ? 0 : d), 120);
+  } };
+}
+const WM_LETTERS = [
+  { ends: [[180, 16, 1], [92, 76.5, -1]], path: (g, d) => {   // G: arm sits below centre, as in the icon
+    g.moveTo(180 - d, 16); g.arcTo(16, 16, 16, 68, 39); g.arcTo(16, 120, 70, 120, 39);
+    g.arcTo(164, 120, 164, 76.5, 20); g.arcTo(164, 76.5, 100, 76.5, 14); g.lineTo(92 + d, 76.5);
+  } },
+  { path: (g, d) => { g.moveTo(209, 2); g.arcTo(209, 120, 240, 120, 8); g.lineTo(300, 120); } },   // L: open top, foot open into the A
+  { clip: true,                                          // A: legs run past the baseline and are cut flat
+    path: (g, d) => { g.moveTo(297.8, 150); g.arcTo(379.5, -2, 461.2, 150, 21); g.lineTo(461.2, 150); },
+    bar: (g, d) => { g.moveTo(338 + d * 1.4, 81); g.lineTo(421 - d * 1.4, 81); } },
+  sLetter(470, true), sLetter(630, false)
+];
+const wm = {};
+function makeWordmark() {
+  const k = WMH * S / WM.h;
+  wm.w = Math.round(WM.w * k);
+  const cw = wm.w + PAD * 2, ch = Math.round(WM.h * k) + PAD * 2;
+  // one pass over every letter: d insets the ends, core marks the red band between the tubes
+  const pass = (o) => {
+    const c = mk(cw, ch), ctx = c.getContext('2d'), grow = o.grow || 0;
+    for (const L of WM_LETTERS) {
+      ctx.save(); ctx.translate(PAD, PAD); ctx.scale(k, k); ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+      if (L.clip) { ctx.beginPath(); ctx.rect(-60, -grow, WM.w + 120, WM.h - (o.core ? WM.tube : 0) + grow * 2); ctx.clip(); }
+      ctx.strokeStyle = ctx.fillStyle = o.color;
+      ctx.beginPath(); L.path(ctx, o.d); ctx.lineWidth = o.w; ctx.stroke();
+      if (o.caps && L.ends) for (const [ex, ey, dir] of L.ends) {   // the white band stops short, then gets a small-radius end cap
+        ctx.beginPath(); ctx.roundRect(dir > 0 ? ex - 13 : ex, ey - WM.T / 2, 13, WM.T, dir > 0 ? [0, 7, 7, 0] : [7, 0, 0, 7]); ctx.fill();
+      }
+      if (L.bar) { ctx.beginPath(); L.bar(ctx, o.d); ctx.lineWidth = o.bar; ctx.stroke(); }
+      ctx.restore();
+    }
+    return c;
+  };
+  const lay = (g, src, blur, a) => { g.filter = blur ? `blur(${blur}px)` : 'none'; g.globalAlpha = a; g.drawImage(src, 0, 0); g.filter = 'none'; g.globalAlpha = 1; };
+  const band = { d: 6, w: WM.T, caps: true, bar: 20 }, core = { d: WM.tube, w: WM.T - WM.tube * 2, core: true, bar: 5 };
+
+  // glow: a dark pocket first so the sign lifts off the field, then red wide to orange tight; nothing sharp outside the white
+  const red = pass({ d: 0, w: WM.T + 6, grow: 6, bar: 26, color: '#ff2c02' }), orange = pass({ d: 0, w: WM.T + 3, grow: 3, bar: 23, color: '#ff7a22' });
+  wm.glow = mk(cw, ch); let g = wm.glow.getContext('2d');
+  lay(g, pass({ d: 0, w: WM.T + 6, grow: 6, bar: 26, color: '#000' }), 15, .78);
+  lay(g, red, 40, .42); lay(g, red, 21, .6); lay(g, red, 9, .86); lay(g, orange, 3.5, .92);
+
+  // tube: white glass, a core that runs hotter where it meets the glass, a hairline of pure white down each tube
+  wm.tube = mk(cw, ch); g = wm.tube.getContext('2d');
+  lay(g, pass({ ...band, color: '#fff3e6' }), 0, 1);
+  lay(g, pass({ ...band, w: WM.T - 5, d: 7, bar: 16, color: '#ffffff' }), .8, 1);
+  lay(g, pass({ ...core, color: '#ff5a1c' }), 0, 1);
+  lay(g, pass({ ...core, w: 6.5, bar: 2.4, color: '#ee2202' }), 1.3, .95);
+
+  // unlit: what the sign looks like in the frames where the flicker drops it
+  wm.off = mk(cw, ch); g = wm.off.getContext('2d');
+  lay(g, pass({ ...band, color: 'rgba(172,150,150,.36)' }), 0, 1);
+  lay(g, pass({ ...core, color: 'rgba(38,8,6,.92)' }), 0, 1);
+}
+
+// ---------- SHATTER shard sprite (baked, unchanged from glass-face-mock.html) ----------
+const SPAD = 28, SHW = 104, SHH = 32;
+const SHPTS = [[0, .44], [.09, .03], [.5, 0], [.94, .12], [1, .6], [.85, 1], [.38, .94], [.06, .88]];
+const SHHIT = [.2, .4];                                  // impact point the cracks run from
+function makeShard(hot) {
+  const c = mk((SHW + SPAD) * S, (SHH + SPAD) * S), g = c.getContext('2d');
+  g.scale(S, S); g.translate(SPAD / 2, SPAD / 2);
+  const P = SHPTS.map(p => [p[0] * SHW, p[1] * SHH]), ix = SHHIT[0] * SHW, iy = SHHIT[1] * SHH;
+  const path = (dx) => { g.beginPath(); P.forEach((p, i) => i ? g.lineTo(p[0] + dx, p[1]) : g.moveTo(p[0] + dx, p[1])); g.closePath(); };
+  path(0);
+  const body = g.createLinearGradient(0, 0, SHW, SHH);
+  body.addColorStop(0, hot ? 'rgba(34,44,66,.9)' : 'rgba(14,18,30,.88)'); body.addColorStop(1, 'rgba(4,6,11,.9)');
+  g.fillStyle = body; g.fill();
+  const tints = [[255, 80, 60], [90, 225, 245], [255, 255, 255], [150, 110, 255], [255, 190, 90], [90, 225, 245], [255, 80, 150], [255, 255, 255]];
+  for (let i = 0; i < P.length; i++) {                    // facets fanning from the impact point
+    const a = P[i], b = P[(i + 1) % P.length];
+    const gr = g.createLinearGradient(ix, iy, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    gr.addColorStop(0, rgba(tints[i], 0)); gr.addColorStop(1, rgba(tints[i], (i % 2 ? .1 : .24) * (hot ? 1.7 : 1)));
+    g.fillStyle = gr; g.beginPath(); g.moveTo(ix, iy); g.lineTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.closePath(); g.fill();
+    g.strokeStyle = `rgba(225,238,255,${hot ? .4 : .22})`; g.lineWidth = .5;
+    g.beginPath(); g.moveTo(ix, iy); g.lineTo(a[0], a[1]); g.stroke();
+  }
+  g.globalCompositeOperation = 'lighter'; g.lineJoin = 'round';
+  g.shadowColor = 'rgba(120,200,255,.9)'; g.shadowBlur = hot ? 14 : 8;
+  g.lineWidth = 1.2; path(-.9); g.strokeStyle = 'rgba(70,225,255,.8)'; g.stroke();   // split rim: cyan / red / white core
+  g.shadowColor = 'rgba(255,70,50,.9)'; path(.9); g.strokeStyle = 'rgba(255,70,55,.8)'; g.stroke();
+  g.shadowBlur = 0; g.lineWidth = .9; path(0); g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
+  const glint = g.createRadialGradient(ix, iy, 0, ix, iy, hot ? 13 : 9);
+  glint.addColorStop(0, 'rgba(255,255,255,1)'); glint.addColorStop(.3, 'rgba(160,220,255,.5)'); glint.addColorStop(1, 'rgba(160,220,255,0)');
+  g.fillStyle = glint; g.beginPath(); g.arc(ix, iy, 14, 0, 7); g.fill();
+  return c;
+}
+let shards = [];
+
+// ---------- knob cap sprites (baked) ----------
+const CP = 14;                                           // room around a cap for its shadow
+function makeCap(kind, R, col) {
+  const c = mk((R + CP) * 2 * S, (R + CP) * 2 * S), g = c.getContext('2d');
+  g.scale(S, S); g.translate(R + CP, R + CP);
+  const disc = (r, y) => { g.beginPath(); g.arc(0, y || 0, r, 0, 7); };
+  const shadow = (blur, a, dy) => { g.save(); g.filter = `blur(${blur}px)`; g.fillStyle = `rgba(0,0,0,${a})`; disc(R, dy); g.fill(); g.restore(); };
+  if (kind === 'dome') {                                 // dark glass dome in a chrome ring, after the icon's rim
+    shadow(5, .8, 3.5);
+    const ring = g.createLinearGradient(-R, -R, R, R);
+    [[0, '#f6f8fb'], [.3, '#6d7480'], [.55, '#dde2e9'], [.8, '#3a3f48'], [1, '#aab0ba']].forEach(s => ring.addColorStop(...s));
+    g.fillStyle = ring; disc(R); g.fill();
+    const body = g.createRadialGradient(-R * .3, -R * .42, 1, 0, 0, R - 1.6);
+    body.addColorStop(0, rgba(mix([60, 64, 78], col, .2), 1)); body.addColorStop(.55, 'rgb(15,17,25)'); body.addColorStop(1, 'rgb(4,5,9)');
+    g.fillStyle = body; disc(R - 1.6); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = 1; g.stroke();
+    g.save(); disc(R - 2.4); g.clip();
+    radial(g, 0, R * .8, R * .8, [[0, col, .3], [1, col, 0]]);          // colour bounced up from the arc
+    g.filter = 'blur(2px)'; g.fillStyle = 'rgba(255,255,255,.24)';      // window reflection
+    g.beginPath(); g.ellipse(-R * .2, -R * .62, R * .62, R * .3, -.25, 0, 7); g.fill();
+    g.restore();
+  } else if (kind === 'disc') {                          // frosted disc
+    shadow(4, .55, 2.5);
+    g.fillStyle = 'rgba(13,16,25,.9)'; disc(R); g.fill();
+    const f = g.createLinearGradient(0, -R, 0, R); f.addColorStop(0, 'rgba(255,255,255,.2)'); f.addColorStop(1, 'rgba(255,255,255,.03)');
+    g.fillStyle = f; disc(R); g.fill();
+    const e = g.createLinearGradient(0, -R, 0, R); e.addColorStop(0, 'rgba(255,255,255,.7)'); e.addColorStop(1, 'rgba(255,255,255,.1)');
+    g.strokeStyle = e; g.lineWidth = 1; disc(R - .5); g.stroke();
+  } else if (kind === 'matte') {                         // machined black cap with a knurled edge and a dished top
+    shadow(6, .95, 4);
+    const body = g.createLinearGradient(0, -R, 0, R); body.addColorStop(0, 'rgb(50,53,61)'); body.addColorStop(.5, 'rgb(17,18,22)'); body.addColorStop(1, 'rgb(6,6,9)');
+    g.fillStyle = body; disc(R); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,.2)'; g.lineWidth = .7;
+    for (let i = 0; i < 64; i++) { const a = i / 64 * Math.PI * 2; g.beginPath(); g.moveTo(Math.cos(a) * (R - 3), Math.sin(a) * (R - 3)); g.lineTo(Math.cos(a) * (R - .4), Math.sin(a) * (R - .4)); g.stroke(); }
+    const dish = g.createLinearGradient(0, -R, 0, R); dish.addColorStop(0, 'rgb(8,9,12)'); dish.addColorStop(1, 'rgb(34,36,43)');
+    g.fillStyle = dish; disc(R - 3.6); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,.85)'; g.lineWidth = .8; g.stroke();
+    arc(g, 0, 0, R - .5, Math.PI * 1.15, Math.PI * 1.85, 1, 'rgba(255,255,255,.42)');
+  }
+  return c;
+}
+const caps = {};
+function blitCap(g, sprite, cx, cy, R) { g.drawImage(sprite, cx - R - CP, cy - R - CP, (R + CP) * 2, (R + CP) * 2); }
+
+let grain = null, paneShadow = null;
+function makeGrain() {
+  const c = mk(160, 160), g = c.getContext('2d'), r = rng(77), d = g.createImageData(160, 160);
+  for (let i = 0; i < d.data.length; i += 4) { const v = r() < .5 ? 255 : 0; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = r() * 26; }
+  g.putImageData(d, 0, 0); return c;
+}
+function makePaneShadow(P) {
+  const c = mk(PW, PH), g = c.getContext('2d'); g.scale(S, S);
+  g.filter = 'blur(9px)'; g.fillStyle = 'rgba(0,0,0,.85)'; rr(g, P.x, P.y + 5, P.w, P.h, P.r); g.fill();
+  return c;
+}
+
+// ---------- shared state ----------
+const KNOBS = [
+  { label: 'REFLECT', macro: 0, color: [237, 94, 69] },
+  { label: 'VERB',    macro: 7, color: [242, 138, 77] },
+  { label: 'DELAY',   macro: 1, color: [252, 196, 107] },
+  { label: 'ECHO %',  macro: 2, color: [94, 212, 201] },
+  { label: 'ECHO T',  macro: 3, color: [71, 184, 217] },
+  { label: 'WAVY',    macro: 4, color: [102, 148, 235] },
+  { label: 'WOBBLE',  macro: 5, color: [163, 87, 201] },
+  { label: 'COMP',    macro: 6, color: [219, 87, 158] }
+];
+const PRESETS = [
+  { name: 'MIDNIGHT', vals: [82, 68, 69, 65, 64, 64, 0, 41], accent: [77, 140, 242],
+    pal: [[60, 110, 255], [90, 80, 240], [40, 170, 255], [130, 110, 255], [90, 200, 255]], seed: 211 },
+  { name: 'ANGELS', vals: [127, 75.2, 49.96, 52.93, 78.83, 53.06, 43, 97.3], accent: [209, 143, 245],
+    pal: [[255, 130, 200], [255, 200, 120], [200, 150, 255], [255, 170, 90], [255, 80, 150]], seed: 322 },
+  { name: 'GHOSTS', vals: [45.94, 16.37, 80, 66.45, 107.79, 35, 110, 80.56], accent: [102, 219, 153],
+    pal: [[70, 240, 160], [50, 210, 200], [140, 255, 170], [40, 180, 220], [120, 255, 210]], seed: 433 }
+];
+const ICON_PAL = [[255, 60, 40], [255, 60, 40], [255, 140, 50], [255, 200, 90], [60, 220, 230], [70, 120, 255], [240, 70, 170], [150, 90, 255]];
+const palFromHue = h => [hsl(h, 1, .6), hsl(h + 28, 1, .62), hsl(h + 150, .95, .6), hsl(h + 185, 1, .6), hsl(h + 215, .9, .65), hsl(h + 320, 1, .62)];
+// macro index order, 0..127, seeded from the device screenshot
+const st = { vals: [20, 22, 90, 42, 30, 6, 4, 51].map(p => p * 1.27), active: -1, energy: 0, geo: null, shT: -1, p: 1 };
+let hover = { face: -1, knob: -1, preset: -1, shatter: false }, drag = null;
+
+const A0 = Math.PI * .75, SWEEP = Math.PI * 1.5;
+const UI = '"Avenir Next", "Helvetica Neue", Arial', DIN = '"DIN Alternate", "Avenir Next", Arial';
+function layout(o) {
+  return Object.assign({ m: 20, KY: 121, KR: 20, labelY: 75, valueY: 160, wm: { x: 16, yc: 30, h: 42 }, pill: { w: 92, h: 30, gap: 8, y: 14, right: 14 }, shard: null }, o);
+}
+const kx = (L, i) => L.m + (W - L.m * 2) / 8 * (i + .5);
+const pillX = (L, p) => W - L.pill.right - (3 - p) * L.pill.w - (2 - p) * L.pill.gap;
+const wmWidth = L => WM.w / WM.h * L.wm.h;
+const wmLeft = L => L.wm.center ? (W - wmWidth(L)) / 2 : L.wm.x;
+function shardRect(L) {
+  if (L.shard) return [L.shard.x, L.shard.y, L.shard.w, L.shard.w * SHH / SHW];
+  const x0 = wmLeft(L) + wmWidth(L) + 14, x1 = pillX(L, 0) - 14, w = Math.min(SHW, x1 - x0), h = w * SHH / SHW;
+  return [x0 + (x1 - x0 - w) / 2, L.pill.y + L.pill.h / 2 - h / 2, w, h];
+}
+
+// SHATTER plays for about half a second: the sign flickers and the new field comes up hot
+const lit = () => { const p = st.p; return p >= 1 ? 1 : p < .07 ? .12 : p < .15 ? 1 : p < .22 ? .25 : p < .33 ? 1 : p < .39 ? .5 : 1; };
+const flash = () => Math.max(0, 1 - st.p * 2.4);
+const fieldA = base => Math.min(1, base + (1 - base) * st.energy + flash() * .4);
+function blit(g, img, a) { g.globalAlpha = a; g.drawImage(img, 0, 0, W, H); g.globalAlpha = 1; }
+
+function drawWM(g, L) {
+  const k = L.wm.h / WMH, sw = wm.glow.width / S * k, sh = wm.glow.height / S * k, x = wmLeft(L) - PAD / S * k, y = L.wm.yc - sh / 2, on = lit();
+  if (on < 1) g.drawImage(wm.off, x, y, sw, sh);
+  g.globalAlpha = on * (.8 + .2 * st.energy); g.drawImage(wm.glow, x, y, sw, sh);
+  g.globalAlpha = on; g.drawImage(wm.tube, x, y, sw, sh); g.globalAlpha = 1;
+}
+function drawShard(g, L, fi, font) {
+  const [x, y, w, h] = shardRect(L), k = w / SHW;
+  g.drawImage(shards[hover.face === fi && hover.shatter ? 1 : 0], x - SPAD / 2 * k, y - SPAD / 2 * k, (SHW + SPAD) * k, (SHH + SPAD) * k);
+  text(g, 'SHATTER', x + w / 2 + 3 * k, y + h / 2 + .5, font || `600 ${10.5 * k}px ${UI}`, '#fff', 1.6 * k);
+}
+function eachKnob(L, fi, fn) {
+  for (let i = 0; i < 8; i++) {
+    const k = KNOBS[i], f = st.vals[k.macro] / 127;
+    fn({ i, k, cx: kx(L, i), f, a: A0 + SWEEP * f, hot: ((hover.face === fi || hover.face === -2) && hover.knob === i) || (drag && drag.face === fi && drag.knob === i), pct: Math.round(f * 100) + '%' });
+  }
+}
+function eachPill(L, fi, fn) {
+  for (let p = 0; p < 3; p++) fn({ p, P: PRESETS[p], x: pillX(L, p), y: L.pill.y, w: L.pill.w, h: L.pill.h, on: st.active === p, hv: hover.face === fi && hover.preset === p });
+}
+function glassPills(g, L, fi, font, ls) {
+  eachPill(L, fi, ({ P, x, y, w, h, on, hv }) => {
+    rr(g, x, y, w, h, 5.5);
+    g.fillStyle = on ? rgba(mix([5, 7, 12], P.accent, .22), .86) : hv ? 'rgba(28,33,46,.82)' : 'rgba(5,7,12,.7)'; g.fill();
+    const e = g.createLinearGradient(0, y, 0, y + h);
+    if (on) { e.addColorStop(0, rgba(mix(P.accent, WHITE, .35), 1)); e.addColorStop(1, rgba(P.accent, .75)); }
+    else { e.addColorStop(0, `rgba(255,255,255,${hv ? .55 : .3})`); e.addColorStop(1, `rgba(255,255,255,${hv ? .22 : .08})`); }
+    g.strokeStyle = e; g.lineWidth = 1; g.stroke();
+    text(g, P.name, x + w / 2, y + h * .42, font, on ? '#fff' : 'rgba(208,214,226,.84)', ls);
+    g.strokeStyle = rgba(P.accent, on ? 1 : .7); g.lineWidth = on ? 2 : 1.5; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(x + w / 2 - 13, y + h * .77); g.lineTo(x + w / 2 + 13, y + h * .77); g.stroke();
+  });
+}
+function glowArc(g, cx, cy, r, a0, a1, col, k) { [[11, .09], [7.5, .17], [5, .26]].forEach(([w, a]) => arc(g, cx, cy, r, a0, a1, w, rgba(col, Math.min(1, a * k)))); }
+
+// ---------- the five faces ----------
+const FACES = [
+  { name: 'Slab',
+    tag: 'The icon as a device: the full-strength field behind one sheet of glass, the chrome rim, the wordmark centred as it is on the icon. Baked: wordmark, shard, knob caps. Live: field, arcs, pointers, rim, sheen.',
+    L: layout({ m: 24, KY: 122, KR: 19.5, labelY: 77, valueY: 156.5, wm: { center: true, yc: 31, h: 40 }, shard: { x: 64, y: 12.5, w: 120 }, pill: { w: 66, h: 28, gap: 5, y: 17, right: 18 } }),
+    build(geo) { return { sharp: renderField(geo) }; },
+    draw(g, F, fi) {
+      const L = F.L;
+      g.fillStyle = '#0a0b0e'; g.fillRect(0, 0, W, H);
+      g.save(); rr(g, 1, 1, W - 2, H - 2, 8); g.clip();
+      g.fillStyle = '#020309'; g.fillRect(0, 0, W, H);
+      blit(g, F.layers.sharp, fieldA(.7));
+      rr(g, 12, 63, W - 24, 99, 9); g.fillStyle = 'rgba(2,3,9,.6)'; g.fill();          // well the knobs sit in
+      const wg = g.createLinearGradient(0, 63, 0, 162); wg.addColorStop(0, 'rgba(0,0,0,.85)'); wg.addColorStop(1, 'rgba(255,255,255,.2)');
+      g.strokeStyle = wg; g.lineWidth = 1; g.stroke();
+      drawWM(g, L); drawShard(g, L, fi);
+      glassPills(g, L, fi, `600 9px ${UI}`, 1);
+      eachKnob(L, fi, ({ i, k, cx, f, a, hot, pct }) => {
+        const r = L.KR + 6.5;
+        text(g, k.label, cx, L.labelY, `600 9.5px ${UI}`, hot ? '#fff' : 'rgba(214,220,232,.86)', 1.3);
+        arc(g, cx, L.KY, r, A0, A0 + SWEEP, 3, 'rgba(150,160,184,.24)');
+        if (f > .004) {
+          const col = mix(k.color, WHITE, f * .3);
+          glowArc(g, cx, L.KY, r, A0, a, col, (.6 + .4 * f) * (hot ? 1.6 : 1));
+          arc(g, cx, L.KY, r, A0, a, 3, rgba(col, 1));
+          arc(g, cx, L.KY, r, A0, a, .8, `rgba(255,255,255,${.3 + .5 * f})`);
+        }
+        blitCap(g, caps.dome[i], cx, L.KY, L.KR);
+        g.strokeStyle = 'rgba(244,247,252,.96)'; g.lineWidth = 2.2; g.lineCap = 'round';
+        g.beginPath(); g.moveTo(cx + Math.cos(a) * L.KR * .4, L.KY + Math.sin(a) * L.KR * .4); g.lineTo(cx + Math.cos(a) * L.KR * .78, L.KY + Math.sin(a) * L.KR * .78); g.stroke();
+        text(g, pct, cx, L.valueY, `600 10.5px ${UI}`, rgba(mix(k.color, WHITE, .14), 1), .3);
+      });
+      // sheen: light raking across the glass from the top left, and along its top edge
+      const sh = g.createLinearGradient(0, 0, W * .5, H * 1.6); sh.addColorStop(0, 'rgba(255,255,255,.1)'); sh.addColorStop(.5, 'rgba(255,255,255,.015)'); sh.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = sh; g.beginPath(); g.moveTo(0, 0); g.lineTo(W * .58, 0); g.lineTo(W * .4, H); g.lineTo(0, H); g.closePath(); g.fill();
+      const te = g.createLinearGradient(0, 0, 0, 16); te.addColorStop(0, 'rgba(255,255,255,.14)'); te.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = te; g.fillRect(0, 0, W, 16);
+      g.restore();
+      const ch = g.createLinearGradient(0, 0, W, H);                                    // chrome rim
+      [[0, '#f7f9fc'], [.07, '#8b929c'], [.2, '#eceff4'], [.38, '#5c626c'], [.55, '#dde2e8'], [.7, '#737a85'], [.86, '#f4f6f9'], [1, '#666c76']].forEach(s => ch.addColorStop(...s));
+      rr(g, 1.5, 1.5, W - 3, H - 3, 7.5); g.strokeStyle = ch; g.lineWidth = 3; g.stroke();
+      rr(g, 3.5, 3.5, W - 7, H - 7, 5.5); g.strokeStyle = 'rgba(0,0,0,.75)'; g.lineWidth = 1; g.stroke();
+      rr(g, .5, .5, W - 1, H - 1, 8.5); g.strokeStyle = 'rgba(0,0,0,.9)'; g.lineWidth = 1; g.stroke();
+    } },
+
+  { name: 'Smoked pane',
+    tag: 'The knobs sit on a frosted pane. Under it is the same shatter, drawn soft, so the pane changes colour with every hit. Baked: wordmark, shard, caps, the pane\'s shadow and grain. Live: both passes of the field, arcs, pointers.',
+    L: layout({ KY: 117, KR: 19, labelY: 77, valueY: 150.5 }),
+    pane: { x: 12, y: 61, w: W - 24, h: 100, r: 11 },
+    build(geo) { return { sharp: renderField(geo), soft: renderSoft(geo) }; },
+    draw(g, F, fi) {
+      const L = F.L, P = F.pane;
+      blit(g, F.layers.sharp, fieldA(.72));
+      g.drawImage(paneShadow, 0, 0, W, H);
+      g.save(); rr(g, P.x, P.y, P.w, P.h, P.r); g.clip();
+      g.fillStyle = '#020309'; g.fillRect(0, 0, W, H);
+      blit(g, F.layers.soft, fieldA(.6));
+      const tint = g.createLinearGradient(0, P.y, 0, P.y + P.h); tint.addColorStop(0, 'rgba(26,30,44,.42)'); tint.addColorStop(1, 'rgba(6,8,14,.66)');
+      g.fillStyle = tint; g.fillRect(0, 0, W, H);
+      g.save(); g.scale(1 / S, 1 / S); g.fillStyle = g.createPattern(grain, 'repeat'); g.fillRect(0, 0, PW, PH); g.restore();
+      const top = g.createLinearGradient(0, P.y, 0, P.y + 22); top.addColorStop(0, 'rgba(255,255,255,.13)'); top.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = top; g.fillRect(0, P.y, W, 22);
+      g.restore();
+      const e = g.createLinearGradient(0, P.y, 0, P.y + P.h); e.addColorStop(0, 'rgba(255,255,255,.6)'); e.addColorStop(.25, 'rgba(255,255,255,.16)'); e.addColorStop(1, 'rgba(255,255,255,.07)');
+      rr(g, P.x + .5, P.y + .5, P.w - 1, P.h - 1, P.r - .5); g.strokeStyle = e; g.lineWidth = 1; g.stroke();
+      drawWM(g, L); drawShard(g, L, fi);
+      glassPills(g, L, fi, `500 10px ${UI}`, 1.3);
+      eachKnob(L, fi, ({ i, k, cx, f, a, hot, pct }) => {
+        const r = L.KR + 6;
+        text(g, k.label, cx, L.labelY, `500 9.5px ${UI}`, hot ? '#fff' : 'rgba(226,231,241,.8)', 1.5);
+        arc(g, cx, L.KY, r, A0, A0 + SWEEP, 1.6, 'rgba(255,255,255,.17)', 'round');
+        if (f > .004) {
+          const col = mix(k.color, WHITE, .12 + f * .25);
+          [[7, .1], [4.4, .2]].forEach(([w, al]) => arc(g, cx, L.KY, r, A0, a, w, rgba(col, al * (hot ? 1.7 : 1)), 'round'));
+          arc(g, cx, L.KY, r, A0, a, 2.2, rgba(col, 1), 'round');
+        }
+        blitCap(g, caps.disc, cx, L.KY, L.KR);
+        const px = cx + Math.cos(a) * L.KR * .62, py = L.KY + Math.sin(a) * L.KR * .62;
+        radial(g, px, py, 6, [[0, k.color, .5], [1, k.color, 0]]);
+        g.fillStyle = '#fff'; g.beginPath(); g.arc(px, py, 2.1, 0, 7); g.fill();
+        text(g, pct, cx, L.valueY, `500 10.5px ${UI}`, rgba(mix(k.color, WHITE, .28), 1), .4);
+      });
+    } },
+
+  { name: 'Neon',
+    tag: 'The knob rings and the preset pills are built the way the wordmark is: a white tube around a coloured core, with unlit tube where the value has not reached. The field drops back so the sign carries. Baked: wordmark, shard. Live: everything else.',
+    L: layout({ KY: 121, KR: 20, labelY: 75, valueY: 160.5, pill: { w: 88, h: 28, gap: 9, y: 16, right: 15 } }),
+    build(geo) { return { sharp: renderField(geo, { haze: .8, dust: .8 }) }; },
+    tube(g, cx, cy, r, a0, a1, col, k) {                 // lit tube: glow, white glass, coloured core
+      [[15, .05], [11, .09], [8, .15]].forEach(([w, al]) => arc(g, cx, cy, r, a0, a1, w, rgba(col, Math.min(1, al * k))));
+      arc(g, cx, cy, r, a0, a1, 5.2, '#fff8ef'); arc(g, cx, cy, r, a0 + .03, a1 - .03, 2, rgba(col, 1));
+    },
+    draw(g, F, fi) {
+      const L = F.L;
+      blit(g, F.layers.sharp, fieldA(.34) * .72);
+      const dk = g.createLinearGradient(0, 0, 0, H); dk.addColorStop(0, 'rgba(2,3,8,0)'); dk.addColorStop(.36, 'rgba(2,3,8,.5)'); dk.addColorStop(1, 'rgba(2,3,8,.66)');
+      g.fillStyle = dk; g.fillRect(0, 0, W, H);
+      drawWM(g, L); drawShard(g, L, fi);
+      eachPill(L, fi, ({ P, x, y, w, h, on, hv }) => {
+        if (on) {
+          [[10, .07], [7, .13], [5, .2]].forEach(([lw, al]) => { rr(g, x, y, w, h, 7); g.strokeStyle = rgba(P.accent, al); g.lineWidth = lw; g.stroke(); });
+          rr(g, x, y, w, h, 7); g.fillStyle = rgba(P.accent, .1); g.fill(); g.strokeStyle = '#fff8ef'; g.lineWidth = 3.6; g.stroke();
+          g.strokeStyle = rgba(P.accent, 1); g.lineWidth = 1.3; g.stroke();
+        } else {
+          rr(g, x, y, w, h, 7); g.fillStyle = 'rgba(3,4,9,.6)'; g.fill();
+          g.strokeStyle = hv ? 'rgba(210,218,235,.5)' : 'rgba(150,160,182,.3)'; g.lineWidth = 3.6; g.stroke();
+          g.strokeStyle = 'rgba(4,5,10,.92)'; g.lineWidth = 1.5; g.stroke();
+        }
+        text(g, P.name, x + w / 2, y + h / 2 + .5, `700 10.5px ${DIN}`, on ? '#fff' : hv ? 'rgba(232,236,245,.95)' : 'rgba(190,198,214,.75)', 1.7);
+      });
+      eachKnob(L, fi, ({ k, cx, f, a, hot, pct }) => {
+        const r = L.KR + 5;
+        text(g, k.label, cx, L.labelY, `700 10px ${DIN}`, hot ? '#fff' : 'rgba(222,227,238,.86)', 1.7);
+        arc(g, cx, L.KY, r, A0, A0 + SWEEP, 5.2, 'rgba(150,160,182,.26)'); arc(g, cx, L.KY, r, A0 + .02, A0 + SWEEP - .02, 2.4, 'rgba(4,5,10,.92)');
+        if (f > .012) F.tube(g, cx, L.KY, r, A0, a, mix(k.color, WHITE, f * .12), (.7 + .5 * f) * (hot ? 1.5 : 1));
+        const R = L.KR - 6.5;
+        radial(g, cx, L.KY, R + 8, [[0, [2, 3, 8], .75], [.6, [2, 3, 8], .6], [1, [2, 3, 8], 0]]);
+        const body = g.createRadialGradient(cx - 4, L.KY - 5, 1, cx, L.KY, R); body.addColorStop(0, rgba(mix([44, 48, 60], k.color, .14 + f * .2), 1)); body.addColorStop(1, 'rgb(7,8,12)');
+        g.fillStyle = body; g.beginPath(); g.arc(cx, L.KY, R, 0, 7); g.fill(); g.strokeStyle = 'rgba(255,255,255,.14)'; g.lineWidth = 1; g.stroke();
+        const x0 = cx + Math.cos(a) * R * .2, y0 = L.KY + Math.sin(a) * R * .2, x1 = cx + Math.cos(a) * R * .88, y1 = L.KY + Math.sin(a) * R * .88;
+        g.lineCap = 'round'; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1);
+        g.strokeStyle = rgba(k.color, .3); g.lineWidth = 6; g.stroke(); g.strokeStyle = '#fff8ef'; g.lineWidth = 3; g.stroke(); g.strokeStyle = rgba(k.color, 1); g.lineWidth = 1; g.stroke();
+        text(g, pct, cx, L.valueY, `700 11.5px ${DIN}`, rgba(mix(k.color, WHITE, .2), 1), .6);
+      });
+    } },
+
+  { name: 'Crystal',
+    tag: 'Cut-glass knob caps, lit from the top left and holding their light as they turn, inside a ring of segments that fill with the value. The preset pills are cut the same way. Baked: wordmark, shard, one cap filmstrip per knob colour. Live: field, ring segments, pills.',
+    L: layout({ KY: 120.5, KR: 19, labelY: 75, valueY: 160, pill: { w: 90, h: 29, gap: 8, y: 15, right: 14 } }),
+    build(geo) { return { sharp: renderField(geo) }; },
+    gem(g, cx, cy, R, rot, col, f) {
+      const N = 10, T = R * .5, LA = -Math.PI * .75, step = Math.PI * 2 / N;
+      const o = i => [cx + Math.cos(rot + i * step) * R, cy + Math.sin(rot + i * step) * R], t = i => [cx + Math.cos(rot + (i + .5) * step) * T, cy + Math.sin(rot + (i + .5) * step) * T];
+      const shade = (ang, steep) => {                     // the light stays put while the stone turns; inner facets catch it from the far side
+        const b = .5 + .5 * Math.cos(ang - LA + (steep ? 0 : Math.PI * .85)), l = Math.pow(b, steep ? 2.2 : 1.7);
+        return rgba(mix(mix([5, 6, 12], col, .1 + .8 * l), WHITE, Math.pow(b, steep ? 6 : 10) * (steep ? .9 : .7)), 1);
+      };
+      const tri = (p, q, s, style) => { g.fillStyle = style; g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.lineTo(s[0], s[1]); g.closePath(); g.fill(); g.strokeStyle = style; g.lineWidth = .4; g.stroke(); };
+      for (let i = 0; i < N; i++) {
+        tri(o(i), o(i + 1), t(i), shade(rot + (i + .5) * step, true));
+        tri(t(i - 1), t(i), o(i), shade(rot + i * step + (i % 2 ? .5 : -.5), false));
+      }
+      g.beginPath(); for (let i = 0; i < N; i++) { const p = t(i); i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); } g.closePath();   // table
+      const tg = g.createLinearGradient(cx - T, cy - T, cx + T, cy + T); tg.addColorStop(0, rgba(mix(col, WHITE, .72), 1)); tg.addColorStop(.22, rgba(mix([8, 10, 18], col, .6), 1)); tg.addColorStop(1, rgba(mix([3, 4, 9], col, .14), 1));
+      g.fillStyle = tg; g.fill(); g.strokeStyle = 'rgba(255,255,255,.5)'; g.lineWidth = .5; g.stroke();
+      g.strokeStyle = 'rgba(255,255,255,.2)'; g.lineWidth = .4;
+      for (let i = 0; i < N; i++) { const p = o(i), q = t(i), s = t(i - 1); g.beginPath(); g.moveTo(q[0], q[1]); g.lineTo(p[0], p[1]); g.lineTo(s[0], s[1]); g.stroke(); }
+      g.beginPath(); for (let i = 0; i < N; i++) { const p = o(i); i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); } g.closePath(); g.strokeStyle = 'rgba(255,255,255,.34)'; g.lineWidth = .6; g.stroke();
+      const p0 = o(0), ax = cx + Math.cos(rot) * T * .5, ay = cy + Math.sin(rot) * T * .5;   // the marked edge
+      g.strokeStyle = '#fff'; g.lineWidth = 2; g.lineCap = 'round'; g.beginPath(); g.moveTo(ax, ay); g.lineTo(cx + (p0[0] - cx) * .93, cy + (p0[1] - cy) * .93); g.stroke();
+      const sx = cx + Math.cos(LA) * R * .8, sy = cy + Math.sin(LA) * R * .8, gl = [[0, WHITE, 0], [.5, WHITE, .95], [1, WHITE, 0]];   // glint where the light lands
+      fade(g, sx - 6.5, sy, sx + 6.5, sy, gl, .7); fade(g, sx, sy - 6.5, sx, sy + 6.5, gl, .7); radial(g, sx, sy, 2.6, [[0, WHITE, .95], [1, WHITE, 0]]);
+    },
+    draw(g, F, fi) {
+      const L = F.L;
+      blit(g, F.layers.sharp, fieldA(.62));
+      const dk = g.createLinearGradient(0, 0, 0, H); dk.addColorStop(0, 'rgba(2,3,8,0)'); dk.addColorStop(.3, 'rgba(2,3,8,.1)'); dk.addColorStop(.42, 'rgba(2,3,8,.58)'); dk.addColorStop(1, 'rgba(2,3,8,.74)');
+      g.fillStyle = dk; g.fillRect(0, 0, W, H);
+      drawWM(g, L); drawShard(g, L, fi);
+      eachPill(L, fi, ({ P, x, y, w, h, on, hv }) => {
+        const c = 8, path = () => { g.beginPath(); g.moveTo(x + c, y); g.lineTo(x + w, y); g.lineTo(x + w, y + h - c); g.lineTo(x + w - c, y + h); g.lineTo(x, y + h); g.lineTo(x, y + c); g.closePath(); };
+        path(); g.fillStyle = on ? rgba(mix([5, 7, 12], P.accent, .24), .88) : hv ? 'rgba(28,33,46,.84)' : 'rgba(5,7,12,.74)'; g.fill();
+        const fc = g.createLinearGradient(x, y, x + w * .5, y + h); fc.addColorStop(0, rgba(on ? P.accent : WHITE, on ? .34 : .12)); fc.addColorStop(.5, rgba(WHITE, 0));
+        g.fillStyle = fc; g.fill();
+        g.strokeStyle = on ? rgba(mix(P.accent, WHITE, .3), 1) : `rgba(255,255,255,${hv ? .5 : .24})`; g.lineWidth = 1; g.stroke();
+        g.strokeStyle = on ? rgba(mix(P.accent, WHITE, .3), .8) : 'rgba(255,255,255,.2)'; g.lineWidth = .6;
+        g.beginPath(); g.moveTo(x + c, y); g.lineTo(x + c + 5, y + h * .5); g.lineTo(x, y + c); g.stroke();
+        g.fillStyle = rgba(P.accent, on ? 1 : .75); g.beginPath(); g.moveTo(x + w - 13, y + h / 2); g.lineTo(x + w - 9.5, y + h / 2 - 3.5); g.lineTo(x + w - 6, y + h / 2); g.lineTo(x + w - 9.5, y + h / 2 + 3.5); g.closePath(); g.fill();
+        text(g, P.name, x + w / 2 - 3, y + h / 2 + .5, `600 9.5px ${UI}`, on ? '#fff' : 'rgba(208,214,226,.85)', 1.3);
+      });
+      eachKnob(L, fi, ({ k, cx, f, a, hot, pct }) => {
+        const r = L.KR + 7.5, n = 27, seg = SWEEP / n, litN = f * n;
+        text(g, k.label, cx, L.labelY, `600 9.5px ${UI}`, hot ? '#fff' : 'rgba(214,220,232,.86)', 1.4);
+        radial(g, cx, L.KY, L.KR + 22, [[0, [2, 3, 8], .7], [.5, [2, 3, 8], .55], [1, [2, 3, 8], 0]]);
+        for (let s = 0; s < n; s++) {
+          const s0 = A0 + s * seg + seg * .17, s1 = A0 + (s + 1) * seg - seg * .17, on = s + .5 < litN, tip = on && s + 1.5 >= litN;
+          if (tip) [[8, .16], [5.6, .3]].forEach(([w, al]) => arc(g, cx, L.KY, r, s0, s1, w, rgba(k.color, al * (hot ? 1.5 : 1))));
+          arc(g, cx, L.KY, r, s0, s1, 3.4, on ? rgba(mix(k.color, WHITE, tip ? .6 : .08 + .2 * s / n), 1) : 'rgba(150,160,186,.2)');
+        }
+        radial(g, cx + 2.5, L.KY + 4, L.KR + 6, [[0, k.color, .12 + .36 * f], [.55, k.color, .06 + .14 * f], [1, k.color, 0]]);   // light thrown through the stone
+        g.fillStyle = 'rgba(0,0,0,.6)'; g.beginPath(); g.arc(cx + .5, L.KY + 1.5, L.KR + .8, 0, 7); g.fill();
+        F.gem(g, cx, L.KY, L.KR, a, mix(k.color, WHITE, f * .16), f);
+        text(g, pct, cx, L.valueY, `600 10.5px ${UI}`, rgba(mix(k.color, WHITE, .16), 1), .3);
+      });
+    } },
+
+  { name: 'Blackout',
+    tag: 'Near black. Each knob lights its own burst, sized and brightened by its value, so the face shows the patch at a glance. SHATTER redraws all eight bursts and the fractures between them. The value replaces the name on hover. Baked: wordmark, shard, caps. Live: fractures, bursts, arcs.',
+    L: layout({ KY: 106, KR: 22, labelY: 152, wm: { x: 16, yc: 27, h: 35 }, pill: { w: 74, h: 26, gap: 4, y: 14, right: 12 } }),
+    build(geo) {
+      return { lines: renderField(geo, { bg: '#030408', haze: .35, bursts: 0, dust: .45, lines: .8 }),
+        knob: KNOBS.map((k, i) => renderKnobBurst(mix(k.color, geo.pal[i % geo.pal.length], .38), geo.pal, geo.seed + i * 97 + 5)) };
+    },
+    draw(g, F, fi) {
+      const L = F.L;
+      blit(g, F.layers.lines, .5 + .5 * st.energy + flash() * .3);
+      eachKnob(L, fi, ({ i, cx, f, hot }) => {
+        const sc = .5 + .68 * f + (hot ? .05 : 0), d = BR * 2 * sc;
+        g.globalAlpha = Math.min(1, Math.pow(f, .8) * 1.05 + (hot ? .1 : 0) + flash() * .3); g.drawImage(F.layers.knob[i], cx - d / 2, L.KY - d / 2, d, d); g.globalAlpha = 1;
+      });
+      const hd = g.createLinearGradient(0, 0, 0, 62); hd.addColorStop(0, 'rgba(3,4,8,.86)'); hd.addColorStop(.7, 'rgba(3,4,8,.6)'); hd.addColorStop(1, 'rgba(3,4,8,0)');
+      g.fillStyle = hd; g.fillRect(0, 0, W, 62);
+      drawWM(g, L); drawShard(g, L, fi);
+      eachPill(L, fi, ({ P, x, y, w, h, on, hv }) => {
+        text(g, P.name, x + w / 2, y + h * .42, `600 9.5px ${UI}`, on ? '#fff' : hv ? 'rgba(232,236,245,.95)' : 'rgba(170,178,194,.72)', 1.6);
+        if (on) [[5, .16], [3.4, .3]].forEach(([lw, al]) => { g.strokeStyle = rgba(P.accent, al); g.lineWidth = lw; g.lineCap = 'round'; g.beginPath(); g.moveTo(x + w / 2 - 15, y + h * .8); g.lineTo(x + w / 2 + 15, y + h * .8); g.stroke(); });
+        g.strokeStyle = rgba(P.accent, on ? 1 : hv ? .8 : .45); g.lineWidth = on ? 1.8 : 1.2; g.lineCap = 'round';
+        g.beginPath(); g.moveTo(x + w / 2 - 15, y + h * .8); g.lineTo(x + w / 2 + 15, y + h * .8); g.stroke();
+      });
+      eachKnob(L, fi, ({ k, cx, f, a, hot, pct }) => {
+        const r = L.KR + 6.5;
+        arc(g, cx, L.KY, r, A0, A0 + SWEEP, 1.4, 'rgba(255,255,255,.13)', 'round');
+        if (f > .004) {
+          const col = mix(k.color, WHITE, .1 + f * .25);
+          [[6, .1], [3.6, .22]].forEach(([w, al]) => arc(g, cx, L.KY, r, A0, a, w, rgba(col, al * (hot ? 1.7 : 1)), 'round'));
+          arc(g, cx, L.KY, r, A0, a, 1.7, rgba(col, 1), 'round');
+          const ex = cx + Math.cos(a) * r, ey = L.KY + Math.sin(a) * r;
+          radial(g, ex, ey, 9, [[0, k.color, .7], [1, k.color, 0]]); g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ey, 2.3, 0, 7); g.fill();
+        }
+        blitCap(g, caps.matte, cx, L.KY, L.KR);
+        g.strokeStyle = 'rgba(244,247,252,.96)'; g.lineWidth = 1.8; g.lineCap = 'round';
+        g.beginPath(); g.moveTo(cx + Math.cos(a) * L.KR * .3, L.KY + Math.sin(a) * L.KR * .3); g.lineTo(cx + Math.cos(a) * L.KR * .74, L.KY + Math.sin(a) * L.KR * .74); g.stroke();
+        if (hot) text(g, pct, cx, L.labelY, `600 11px ${UI}`, rgba(mix(k.color, WHITE, .2), 1), .4);
+        else text(g, k.label, cx, L.labelY, `600 9px ${UI}`, 'rgba(196,203,217,.8)', 1.7);
+      });
+    } }
+];
+
+// ---------- page, loop, input ----------
+const host = document.getElementById('faces');
+FACES.forEach((F, i) => {
+  const s = document.createElement('section');
+  s.innerHTML = `<h2>${i + 1}. ${F.name}</h2><p class="tag">${F.tag}</p><canvas class="z" width="${PW}" height="${PH}"></canvas><div class="cap">Actual size in Live</div><canvas class="a" width="${PW}" height="${PH}"></canvas>`;
+  host.appendChild(s);
+  [F.z, F.a] = s.querySelectorAll('canvas'); F.zg = F.z.getContext('2d'); F.ag = F.a.getContext('2d');
+});
+
+let raf = 0;
+const target = () => st.vals.reduce((a, b) => a + b, 0) / 8 / 127;
+function frame() {
+  raf = 0;
+  const t = target(); st.energy += (t - st.energy) * .16;
+  let busy = false;
+  if (Math.abs(t - st.energy) < .002) st.energy = t; else busy = true;
+  st.p = st.shT < 0 ? 1 : Math.min(1, (performance.now() - st.shT) / 560);
+  if (st.p < 1) busy = true;
+  FACES.forEach((F, i) => {
+    const g = F.zg; g.setTransform(S, 0, 0, S, 0, 0); g.clearRect(0, 0, W, H);
+    g.save(); F.draw(g, F, i); g.restore();
+    F.ag.setTransform(1, 0, 0, 1, 0, 0); F.ag.clearRect(0, 0, PW, PH); F.ag.drawImage(F.z, 0, 0);
+  });
+  if (busy) kick();
+}
+function kick() { if (!raf) raf = requestAnimationFrame(frame); }
+
+const fields = {};
+function setField(key, pal, seed) {                       // preset fields are fixed; a SHATTER field is made once and never kept
+  const geo = key && fields[key] ? fields[key] : makeGeo(pal, seed);
+  if (key) fields[key] = geo;
+  st.geo = geo; FACES.forEach(F => { F.layers = F.build(geo); });
+}
+function pickField() { if (st.active >= 0) setField('p' + st.active, PRESETS[st.active].pal, PRESETS[st.active].seed); else setField('icon', ICON_PAL, 108); }
+function shatter(seed) {
+  const r = seed === undefined ? Math.random : rng(seed);
+  st.active = -1;
+  setField(null, palFromHue(r() * 360), (r() * 1e9) | 0);   // fresh palette and geometry every hit
+  st.vals = st.vals.map(() => r() * 127);
+  if (seed === undefined) st.shT = performance.now();
+}
+
+function pt(e) { const b = e.currentTarget.getBoundingClientRect(); return [(e.clientX - b.left) * W / b.width, (e.clientY - b.top) * H / b.height]; }
+function hit(L, x, y) {
+  for (let i = 0; i < 8; i++) if (Math.hypot(x - kx(L, i), y - L.KY) < L.KR + 12) return { knob: i };
+  for (let p = 0; p < 3; p++) { const px = pillX(L, p); if (x >= px && x <= px + L.pill.w && y >= L.pill.y && y <= L.pill.y + L.pill.h) return { preset: p }; }
+  const [sx, sy, sW, sH] = shardRect(L); if (x >= sx && x <= sx + sW && y >= sy && y <= sy + sH) return { shatter: true };
+  return {};
+}
+FACES.forEach((F, fi) => {
+  for (const c of [F.z, F.a]) {
+    c.addEventListener('mousedown', e => {
+      const [x, y] = pt(e), h = hit(F.L, x, y);
+      if (h.knob !== undefined) drag = { face: fi, knob: h.knob, y: e.clientY };
+      else if (h.preset !== undefined) { st.active = h.preset; st.vals = PRESETS[st.active].vals.slice(); pickField(); }
+      else if (h.shatter) shatter();
+      kick();
+    });
+    c.addEventListener('mousemove', e => {
+      if (drag) return;
+      const [x, y] = pt(e), h = hit(F.L, x, y);
+      hover = { face: fi, knob: h.knob ?? -1, preset: h.preset ?? -1, shatter: !!h.shatter };
+      c.style.cursor = (h.knob !== undefined) ? 'ns-resize' : (h.preset !== undefined || h.shatter) ? 'pointer' : 'default';
+      kick();
+    });
+    c.addEventListener('mouseleave', () => { if (!drag) { hover = { face: -1, knob: -1, preset: -1, shatter: false }; kick(); } });
+  }
+});
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const m = KNOBS[drag.knob].macro;
+  st.vals[m] = Math.max(0, Math.min(127, st.vals[m] + (drag.y - e.clientY) * .7)); drag.y = e.clientY;
+  st.active = -1; kick();
+});
+window.addEventListener('mouseup', () => { drag = null; kick(); });
+
+(function boot() {
+  makeWordmark(); shards = [makeShard(false), makeShard(true)];
+  caps.dome = KNOBS.map(k => makeCap('dome', FACES[0].L.KR, k.color));
+  caps.disc = makeCap('disc', FACES[1].L.KR); caps.matte = makeCap('matte', FACES[4].L.KR);
+  grain = makeGrain(); paneShadow = makePaneShadow(FACES[1].pane);
+  const qs = new URLSearchParams(location.search), q = qs.get('preset');   // stills: ?preset=0..2, ?shatter=<seed>, ?hover=<knob> (on every face)
+  if (q !== null && PRESETS[+q]) { st.active = +q; st.vals = PRESETS[st.active].vals.slice(); }
+  if (qs.get('shatter')) shatter(+qs.get('shatter')); else pickField();
+  if (qs.get('hover')) hover = { face: -2, knob: +qs.get('hover'), preset: -1, shatter: false };
+  st.energy = target();
+  frame();
+})();
+</script>
+</body>
+</html>

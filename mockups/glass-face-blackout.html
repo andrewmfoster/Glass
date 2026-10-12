@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLASS face: Blackout, round 4</title>
+<style>
+  html, body { margin: 0; background: #141518; color: #9aa0a8; font: 12px/1.45 "Helvetica Neue", Arial, sans-serif; }
+  main { padding: 28px 32px 64px; width: 1410px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #c9ced6; margin: 34px 0 3px; }
+  h2:first-child { margin-top: 0; }
+  .tag { color: #7b828c; margin: 0 0 10px; max-width: 980px; }
+  canvas, img { display: block; }
+  #zoom { width: 1410px; height: 340px; }
+  #actual { width: 705px; height: 170px; }
+  .row { display: flex; gap: 28px; align-items: flex-start; }
+  #icon { width: 170px; height: 170px; }
+  #cur { width: 765px; }
+  #iconwm { width: 880px; height: 237px; background: url(../icon/glass-icon-1024.png) -64px -347px / 1024px 1024px no-repeat; }
+  #mywm { width: 880px; height: 237px; margin-top: 8px; }
+  .pick { display: flex; align-items: center; gap: 6px; margin: 12px 0 0; }
+  .pick span { width: 78px; font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #c9ced6; }
+  .pick button { font: 600 11px/1 "Helvetica Neue", Arial, sans-serif; color: #9aa0a8; background: #1c1e23; border: 1px solid #2c2f36; border-radius: 4px; padding: 7px 11px; cursor: pointer; }
+  .pick button.on { color: #fff; background: #2b2e36; border-color: #6b7280; }
+</style>
+</head>
+<body>
+<main>
+  <h2>Blackout, round 4</h2>
+  <p class="tag">The picked face: Flat cap, Neon button, and a line of each knob's colour along the top edge of its cap. The other options stay under the face for comparison.</p>
+  <canvas id="zoom" width="1410" height="340"></canvas>
+  <div class="pick" id="pickCap"><span>Knob</span></div>
+  <div class="pick" id="pickSh"><span>Shatter</span></div>
+  <div class="pick" id="pickLight"><span>Cap light</span></div>
+  <h2>Actual size in Live</h2>
+  <div class="row">
+    <canvas id="actual" width="1410" height="340"></canvas>
+    <img id="icon" src="../icon/glass-icon-512.png" alt="GLASS icon">
+  </div>
+  <h2>Current device</h2>
+  <img id="cur" src="../screenshots/glass-device.png" alt="Current GLASS device">
+  <h2>Wordmark against the icon</h2>
+  <p class="tag">Top: the icon. Bottom: the sprite the device would load, at the same size.</p>
+  <div id="iconwm"></div>
+  <canvas id="mywm" width="1760" height="474"></canvas>
+</main>
+
+<script>
+// Same rule as glass-face-mock.html: nothing here goes past what the jsui can do at runtime.
+//   BAKED (drawn once offline, blur allowed, shipped as PNG): wordmark, shard, knob cap.
+//   LIVE (plain strokes, fills and gradients, no blur, no additive blending): fractures, bursts,
+//   thrown rays, arcs, pointers, pills. Bursts are rendered once per SHATTER into offscreen images.
+// Baked blur goes through a canvas shadow, not ctx.filter, so Safari draws it too.
+const W = 705, H = 170, S = 2, PW = W * S, PH = H * S;
+
+function rng(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const WHITE = [255, 255, 255];
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.ceil(w); c.height = Math.ceil(h); return c; }
+function hsl(h, s, l) {
+  h = ((h % 360) + 360) % 360 / 360;
+  const q = l < .5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = t => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < .5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return [f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255];
+}
+function radial(g, x, y, rad, stops) {
+  const gr = g.createRadialGradient(x, y, 0, x, y, rad);
+  for (const [t, c, a] of stops) gr.addColorStop(t, rgba(c, a));
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill();
+}
+function fade(g, x0, y0, x1, y1, stops, lw) {            // a stroke whose alpha runs along its length
+  const gr = g.createLinearGradient(x0, y0, x1, y1);
+  for (const [t, c, a] of stops) gr.addColorStop(t, rgba(c, a));
+  g.strokeStyle = gr; g.lineWidth = lw; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+}
+function arc(g, cx, cy, r, a0, a1, w, style, cap) { g.strokeStyle = style; g.lineWidth = w; g.lineCap = cap || 'butt'; g.beginPath(); g.arc(cx, cy, r, a0, a1); g.stroke(); }
+function text(g, s, x, y, font, fill, ls) {
+  g.font = font; g.letterSpacing = ls + 'px'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = fill;
+  g.fillText(s, x + ls / 2, y);
+}
+// A blurred, single-colour copy of src's shape. blur is a Gaussian sigma in canvas pixels.
+function softImg(g, src, blur, a, color) {
+  const off = src.width + 400;
+  g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = a;
+  g.shadowColor = color; g.shadowBlur = blur * 2; g.shadowOffsetX = off; g.drawImage(src, -off, 0);
+  g.restore();
+}
+
+// ---------- the plate: what one SHATTER makes ----------
+const BR = 96;
+function burstGeo(r, col, pick) {
+  const b = { col, rays: [], wedges: [], spikeA: r() * Math.PI }, dirs = [];
+  for (let k = 4 + (r() * 4 | 0); k--;) dirs.push(r() * 7);   // most rays gather into a few sprays, as on the icon
+  for (let k = 4 + (r() * 4 | 0); k--;) b.wedges.push({ a: r() * 7, da: .05 + r() * .2, len: 38 + r() * 54, col: pick() });
+  for (let k = 150; k--;) b.rays.push({ a: r() < .74 ? dirs[(r() * dirs.length) | 0] + (r() - r()) * .2 : r() * 7, len: 22 + r() * r() * 72, col: pick(), lw: .25 + r() * .5 });
+  return b;
+}
+function renderBurst(b, r) {
+  const c = mk(BR * 2 * S, BR * 2 * S), g = c.getContext('2d'); g.scale(S, S);
+  const x = BR, y = BR;
+  radial(g, x, y, BR, [[0, b.col, .42], [.22, b.col, .2], [.55, b.col, .06], [1, b.col, 0]]);          // stands in for bloom
+  for (const w of b.wedges) {                             // refracted shard wedges
+    const gr = g.createRadialGradient(x, y, 0, x, y, w.len);
+    gr.addColorStop(0, rgba(w.col, .34)); gr.addColorStop(1, rgba(w.col, 0));
+    g.fillStyle = gr; g.beginPath(); g.moveTo(x, y);
+    g.lineTo(x + Math.cos(w.a) * w.len, y + Math.sin(w.a) * w.len); g.lineTo(x + Math.cos(w.a + w.da) * w.len, y + Math.sin(w.a + w.da) * w.len);
+    g.closePath(); g.fill();
+  }
+  for (const q of b.rays) {                               // crack rays, each over a wide faint underlay
+    const ex = x + Math.cos(q.a) * q.len, ey = y + Math.sin(q.a) * q.len;
+    fade(g, x, y, ex, ey, [[0, q.col, .2], [1, q.col, 0]], q.lw * 4.5);
+    fade(g, x, y, ex, ey, [[0, mix(q.col, WHITE, .35), .75], [.14, q.col, .9], [1, q.col, 0]], q.lw);
+  }
+  for (let i = 0; i < 60; i++) {                          // sparks
+    const a = r() * 7, d = 26 + r() * 62, rad = .25 + r() * r() * 1.1, col = r() < .35 ? WHITE : mix(b.col, WHITE, r() * .5);
+    g.fillStyle = rgba(col, (.45 + r() * .55) * (1 - d / BR)); g.beginPath(); g.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, rad, 0, 7); g.fill();
+    if (rad > .85) radial(g, x + Math.cos(a) * d, y + Math.sin(a) * d, rad * 5, [[0, col, .3], [1, col, 0]]);
+  }
+  return c;
+}
+function makePlate(pal, seed) {
+  const r = rng(seed), pick = () => pal[(r() * pal.length) | 0];
+  const P = { lines: null, bursts: [], throws: [], pal };
+  const c = mk(PW, PH), g = c.getContext('2d'); g.scale(S, S);                 // cold glass: faint colour, hairline fractures, dust
+  g.fillStyle = '#030408'; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 12; i++) { const col = pick(); radial(g, r() * W, r() * H, 70 + r() * 170, [[0, col, .03 + r() * .045], [1, col, 0]]); }
+  for (let i = 0; i < 90; i++) {
+    const x = r() * W, y = r() * H, a = r() * Math.PI, l0 = 40 + r() * 380, l1 = 40 + r() * 380;
+    g.strokeStyle = rgba(pick(), .05 + r() * .17); g.lineWidth = .25 + r() * .4;
+    g.beginPath(); g.moveTo(x - Math.cos(a) * l0, y - Math.sin(a) * l0); g.lineTo(x + Math.cos(a) * l1, y + Math.sin(a) * l1); g.stroke();
+  }
+  for (let i = 0; i < 420; i++) { g.fillStyle = rgba(r() < .3 ? WHITE : pick(), (.3 + r() * .5) * .5); g.beginPath(); g.arc(r() * W, r() * H, .2 + r() * r() * 1.05, 0, 7); g.fill(); }
+  P.lines = c;
+  KNOBS.forEach((k, i) => {
+    const col = mix(k.color, pal[i % pal.length], .38), kp = () => r() < .65 ? col : pick();
+    P.bursts.push({ img: renderBurst(burstGeo(r, col, kp), r), col, spin: r() < .5 ? -1 : 1 });
+    const t = [];                                         // fractures this knob throws across the plate when it is up
+    for (let n = 7 + (r() * 4 | 0); n--;) t.push({ a: r() * Math.PI, l0: 50 + r() * r() * 330, l1: 50 + r() * r() * 330, col: kp(), lw: .3 + r() * .5, k: .45 + r() * .55, ox: (r() - .5) * 7, oy: (r() - .5) * 7 });
+    P.throws.push(t);
+  });
+  return P;
+}
+
+// ---------- wordmark sprites (baked) ----------
+// Letterforms measured off 3x crops of the icon (icon/glass-icon-1024.png), in icon pixels,
+// 780 x 136 outer. Each letter is a 32px band with squared ends; a 10px white tube runs along
+// both edges of the band with a 12px red core between. Where the icon's tube does not close
+// (top of the L, the L's foot into the A, the first S's lower-left end) the core runs to the end.
+// Round 2, off 5x crops: the icon's glow is tight and saturated, with a crisp orange-red rim
+// hugging the white and only a low haze beyond it, and its core is one flat colour. Side by side
+// at the same size the tube reads 12 and the core 8; the L's two strands end in round tips; and each
+// letter sits on top of the one before it, so the A's leg closes the L's foot.
+const WM = { w: 780, h: 136, T: 32, tube: 12, pad: 170 };
+function sLetter(x0, openFoot) {
+  return { ends: [[x0 + 150, 16, 1], [x0 + 4, 120, -1]], path: (g, d) => {
+    g.moveTo(x0 + 150 - d, 16); g.lineTo(x0 + 42, 16);
+    g.arc(x0 + 42, 42, 26, -Math.PI / 2, Math.PI / 2, true);
+    g.lineTo(x0 + 108, 68);
+    g.arc(x0 + 108, 94, 26, -Math.PI / 2, Math.PI / 2, false);
+    g.lineTo(x0 + 4 + (openFoot && d === WM.tube ? 0 : d), 120);
+  } };
+}
+const WM_LETTERS = [
+  { ends: [[180, 16, 1], [92, 76.5, -1]], path: (g, d) => {   // G: arm sits below centre, as in the icon
+    g.moveTo(180 - d, 16); g.arcTo(16, 16, 16, 68, 39); g.arcTo(16, 120, 70, 120, 39);
+    g.arcTo(164, 120, 164, 76.5, 20); g.arcTo(164, 76.5, 100, 76.5, 14); g.lineTo(92 + d, 76.5);
+  } },
+  { tips: [[199, 8], [219, 8]],                          // L: open top with a round tip on each strand, foot runs under the A
+    path: (g, d) => { g.moveTo(209, 2 + (d === WM.tube ? 5 : d ? 6 : 0)); g.arcTo(209, 120, 240, 120, 8); g.lineTo(300, 120); } },
+  { clip: true,                                          // A: legs run past the baseline and are cut flat
+    path: (g, d) => { g.moveTo(297.8, 150); g.arcTo(379.5, -2, 461.2, 150, 21); g.lineTo(461.2, 150); },
+    bar: (g, d) => { g.moveTo(338 + d * 1.4, 81); g.lineTo(421 - d * 1.4, 81); } },
+  sLetter(470, true), sLetter(630, false)
+];
+function makeWordmark(hPx) {                              // hPx: letter height in canvas pixels
+  const k = hPx / WM.h, pad = Math.round(WM.pad * k), w = Math.round(WM.w * k), cw = w + pad * 2, ch = Math.round(hPx) + pad * 2;
+  // one pass over every letter: d insets the ends, core marks the red band between the tubes
+  const pass = (o, only) => {
+    const c = mk(cw, ch), ctx = c.getContext('2d'), grow = o.grow || 0;
+    for (const L of only ? [only] : WM_LETTERS) {
+      ctx.save(); ctx.translate(pad, pad); ctx.scale(k, k); ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+      if (L.clip) { ctx.beginPath(); ctx.rect(-60, -grow, WM.w + 120, WM.h - (o.core ? WM.tube : 0) + grow * 2); ctx.clip(); }
+      ctx.strokeStyle = ctx.fillStyle = o.color;
+      ctx.beginPath(); L.path(ctx, o.d); ctx.lineWidth = o.w; ctx.stroke();
+      if (o.caps && L.ends) for (const [ex, ey, dir] of L.ends) {   // the white band stops short, then gets a small-radius end cap
+        ctx.beginPath(); ctx.roundRect(dir > 0 ? ex - 13 : ex, ey - WM.T / 2, 13, WM.T, dir > 0 ? [0, 7, 7, 0] : [7, 0, 0, 7]); ctx.fill();
+      }
+      if (o.caps && L.tips) for (const [tx, ty] of L.tips) { ctx.beginPath(); ctx.arc(tx, ty, WM.tube / 2, 0, 7); ctx.fill(); }
+      if (L.bar) { ctx.beginPath(); L.bar(ctx, o.d); ctx.lineWidth = o.bar; ctx.stroke(); }
+      ctx.restore();
+    }
+    return c;
+  };
+  const band = { d: 6, w: WM.T, caps: true, bar: 20 }, core = { d: WM.tube, w: WM.T - WM.tube * 2, core: true, bar: 4 };
+  const out = { k, pad, w, glow: mk(cw, ch), tube: mk(cw, ch), off: mk(cw, ch) };
+
+  // glow, widest first: low haze, body, tight saturated red, then the crisp rim against the white
+  const body = pass({ d: 0, w: WM.T + 6, grow: 6, bar: 26, color: '#000' });
+  let g = out.glow.getContext('2d');
+  softImg(g, body, 54 * k, .3, '#ff1e00'); softImg(g, body, 25 * k, .5, '#ff2200');
+  softImg(g, body, 10 * k, .92, '#ff2600'); softImg(g, body, 4.5 * k, .9, '#ff3606');
+  softImg(g, pass({ d: 0, w: WM.T + 2, grow: 2, bar: 22, color: '#000' }), 1.2 * k, 1, '#ff3c08');
+
+  // tube: warm white glass around one flat core, as the icon has it
+  g = out.tube.getContext('2d');
+  for (const L of WM_LETTERS) { g.drawImage(pass({ ...band, color: '#fff6ec' }, L), 0, 0); g.drawImage(pass({ ...core, color: '#fb3c0a' }, L), 0, 0); }
+
+  // unlit: what the sign looks like in the frames where the flicker drops it
+  g = out.off.getContext('2d');
+  g.drawImage(pass({ ...band, color: 'rgba(172,150,150,.36)' }), 0, 0);
+  for (const L of WM_LETTERS) g.drawImage(pass({ ...core, color: 'rgb(38,8,6)' }, L), 0, 0);
+  return out;
+}
+let wm = null;
+
+// ---------- SHATTER shard sprite (baked, unchanged from glass-face-mock.html) ----------
+const SPAD = 28, SHW = 104, SHH = 32;
+const SHPTS = [[0, .44], [.09, .03], [.5, 0], [.94, .12], [1, .6], [.85, 1], [.38, .94], [.06, .88]];
+const SHHIT = [.2, .4];                                  // impact point the cracks run from
+function makeShard(hot) {
+  const c = mk((SHW + SPAD) * S, (SHH + SPAD) * S), g = c.getContext('2d');
+  g.scale(S, S); g.translate(SPAD / 2, SPAD / 2);
+  const P = SHPTS.map(p => [p[0] * SHW, p[1] * SHH]), ix = SHHIT[0] * SHW, iy = SHHIT[1] * SHH;
+  const path = (dx) => { g.beginPath(); P.forEach((p, i) => i ? g.lineTo(p[0] + dx, p[1]) : g.moveTo(p[0] + dx, p[1])); g.closePath(); };
+  path(0);
+  const body = g.createLinearGradient(0, 0, SHW, SHH);
+  body.addColorStop(0, hot ? 'rgba(34,44,66,.9)' : 'rgba(14,18,30,.88)'); body.addColorStop(1, 'rgba(4,6,11,.9)');
+  g.fillStyle = body; g.fill();
+  const tints = [[255, 80, 60], [90, 225, 245], [255, 255, 255], [150, 110, 255], [255, 190, 90], [90, 225, 245], [255, 80, 150], [255, 255, 255]];
+  for (let i = 0; i < P.length; i++) {                    // facets fanning from the impact point
+    const a = P[i], b = P[(i + 1) % P.length];
+    const gr = g.createLinearGradient(ix, iy, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    gr.addColorStop(0, rgba(tints[i], 0)); gr.addColorStop(1, rgba(tints[i], (i % 2 ? .1 : .24) * (hot ? 1.7 : 1)));
+    g.fillStyle = gr; g.beginPath(); g.moveTo(ix, iy); g.lineTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.closePath(); g.fill();
+    g.strokeStyle = `rgba(225,238,255,${hot ? .4 : .22})`; g.lineWidth = .5;
+    g.beginPath(); g.moveTo(ix, iy); g.lineTo(a[0], a[1]); g.stroke();
+  }
+  g.globalCompositeOperation = 'lighter'; g.lineJoin = 'round';
+  g.shadowColor = 'rgba(120,200,255,.9)'; g.shadowBlur = hot ? 14 : 8;
+  g.lineWidth = 1.2; path(-.9); g.strokeStyle = 'rgba(70,225,255,.8)'; g.stroke();   // split rim: cyan / red / white core
+  g.shadowColor = 'rgba(255,70,50,.9)'; path(.9); g.strokeStyle = 'rgba(255,70,55,.8)'; g.stroke();
+  g.shadowBlur = 0; g.lineWidth = .9; path(0); g.strokeStyle = 'rgba(255,255,255,.95)'; g.stroke();
+  const glint = g.createRadialGradient(ix, iy, 0, ix, iy, hot ? 13 : 9);
+  glint.addColorStop(0, 'rgba(255,255,255,1)'); glint.addColorStop(.3, 'rgba(160,220,255,.5)'); glint.addColorStop(1, 'rgba(160,220,255,0)');
+  g.fillStyle = glint; g.beginPath(); g.arc(ix, iy, 14, 0, 7); g.fill();
+  return c;
+}
+let shards = [];
+
+// ---------- knob cap sprites (baked) ----------
+// dish: radius of the part of the cap that takes its burst's colour. rim: whether the edge takes it too.
+const CP = 14;                                           // room around the cap for its shadow
+const CAPS = [
+  { name: 'Ridged (round 2)', dish: R => R - 3.8, rim: true },
+  { name: 'Smooth', dish: R => R - 1.8, rim: true },
+  { name: 'Gloss', dish: R => R - 1.2, rim: true },
+  { name: 'Cut glass', dish: R => R * .53, rim: false },
+  { name: 'Flat', dish: R => R - 1.8, rim: true }
+];
+function makeCap(R, style) {
+  const c = mk((R + CP) * 2 * S, (R + CP) * 2 * S), g = c.getContext('2d');
+  g.scale(S, S); g.translate(R + CP, R + CP);
+  const disc = (r, y) => { g.beginPath(); g.arc(0, y || 0, r, 0, 7); };
+  const lin = (y0, y1, stops) => { const gr = g.createLinearGradient(0, y0, 0, y1); for (const [t, col] of stops) gr.addColorStop(t, col); return gr; };
+  g.save(); g.shadowColor = 'rgba(0,0,0,.95)'; g.shadowBlur = 6 * 2 * S; g.shadowOffsetY = 4 * S; g.fillStyle = '#000'; disc(R - 1); g.fill(); g.restore();
+  if (style === 0) {                                      // machined black, knurled edge, dished top
+    g.fillStyle = lin(-R, R, [[0, 'rgb(52,55,63)'], [.5, 'rgb(17,18,22)'], [1, 'rgb(6,6,9)']]); disc(R); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,.2)'; g.lineWidth = .7;
+    for (let i = 0; i < 64; i++) { const a = i / 64 * Math.PI * 2; g.beginPath(); g.moveTo(Math.cos(a) * (R - 3), Math.sin(a) * (R - 3)); g.lineTo(Math.cos(a) * (R - .4), Math.sin(a) * (R - .4)); g.stroke(); }
+    g.fillStyle = lin(-R, R, [[0, 'rgb(7,8,11)'], [1, 'rgb(36,38,46)']]); disc(R - 3.6); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,.85)'; g.lineWidth = .8; g.stroke();
+    arc(g, 0, 0, R - .5, Math.PI * 1.15, Math.PI * 1.85, 1, 'rgba(255,255,255,.42)');
+  } else if (style === 1) {                               // satin dome: one clean bevel, no ridges
+    g.fillStyle = lin(-R, R, [[0, 'rgb(70,73,84)'], [.4, 'rgb(22,23,28)'], [1, 'rgb(5,5,8)']]); disc(R); g.fill();
+    const top = g.createRadialGradient(0, -R * .5, 0, 0, -R * .2, R * 1.5);
+    top.addColorStop(0, 'rgb(44,46,55)'); top.addColorStop(.55, 'rgb(17,18,23)'); top.addColorStop(1, 'rgb(8,8,11)');
+    g.fillStyle = top; disc(R - 1.8); g.fill();
+    arc(g, 0, 0, R - 1.8, 0, 7, .6, 'rgba(0,0,0,.7)');
+    arc(g, 0, 0, R - .5, Math.PI * 1.12, Math.PI * 1.88, .9, 'rgba(255,255,255,.5)');
+    arc(g, 0, 0, R - .5, Math.PI * .2, Math.PI * .8, .7, 'rgba(255,255,255,.07)');
+  } else if (style === 2) {                               // black glass lens: light pools low, one crescent of sky on top
+    const body = g.createRadialGradient(0, R * .45, 0, 0, R * .1, R * 1.25);
+    body.addColorStop(0, 'rgb(38,41,52)'); body.addColorStop(.6, 'rgb(9,10,14)'); body.addColorStop(1, 'rgb(1,1,3)');
+    g.fillStyle = body; disc(R); g.fill();
+    g.save(); disc(R - 1.6); g.clip();
+    g.fillStyle = lin(-R, -R * .12, [[0, 'rgba(255,255,255,.42)'], [1, 'rgba(255,255,255,0)']]);
+    g.beginPath(); g.ellipse(0, -R * .56, R * .74, R * .44, 0, 0, 7); g.fill();
+    g.restore();
+    disc(R - .5); g.strokeStyle = lin(-R, R, [[0, 'rgba(255,255,255,.62)'], [.5, 'rgba(255,255,255,.1)'], [1, 'rgba(255,255,255,.2)']]); g.lineWidth = .8; g.stroke();
+  } else if (style === 3) {                               // cut glass: ten crown facets around a flat table, lit from the upper left
+    const N = 10, st = Math.PI * 2 / N, ri = R * .58, LA = -Math.PI * .7;
+    const po = i => [Math.cos(i * st) * R, Math.sin(i * st) * R], pi = i => [Math.cos((i + .5) * st) * ri, Math.sin((i + .5) * st) * ri];
+    const tri = (p, q, t, lum) => {
+      g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.lineTo(t[0], t[1]); g.closePath();
+      g.fillStyle = `rgb(${lum | 0},${lum * 1.03 | 0},${lum * 1.16 | 0})`; g.fill();
+      g.strokeStyle = 'rgba(255,255,255,.15)'; g.lineWidth = .35; g.lineJoin = 'round'; g.stroke();
+    };
+    for (let i = 0; i < N; i++) {
+      tri(po(i), po(i + 1), pi(i), 9 + 66 * Math.pow(Math.max(0, Math.cos((i + .5) * st - LA)), 1.6));
+      tri(po(i + 1), pi(i), pi(i + 1), 6 + 38 * Math.pow(Math.max(0, Math.cos((i + 1) * st - LA + .5)), 1.6));
+    }
+    g.beginPath(); for (let i = 0; i < N; i++) { const p = pi(i); i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); } g.closePath();
+    g.fillStyle = lin(-ri, ri, [[0, 'rgb(8,9,13)'], [1, 'rgb(34,36,45)']]); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,.26)'; g.lineWidth = .5; g.stroke();
+    g.beginPath(); for (let i = 0; i < N; i++) { const p = po(i); i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]); } g.closePath();
+    g.strokeStyle = lin(-R, R, [[0, 'rgba(255,255,255,.6)'], [1, 'rgba(255,255,255,.12)']]); g.lineWidth = .7; g.stroke();
+  } else {                                                // flat: a dark disc and one fine ring, the burst does the rest
+    g.fillStyle = '#06070a'; disc(R); g.fill();
+    disc(R - .6); g.strokeStyle = lin(-R, R, [[0, 'rgba(255,255,255,.4)'], [1, 'rgba(255,255,255,.14)']]); g.lineWidth = 1; g.stroke();
+  }
+  return c;
+}
+let caps = [], capStyle = 4, capLight = 2;
+const LIGHTS = ['As is', 'Stronger', 'Top edge'];
+
+// ---------- SHATTER button, the other three (sprites are baked; Text is drawn live) ----------
+const SHATTERS = ['Shard (round 2)', 'Pane', 'Neon', 'Text'];
+function shCanvas() { const c = mk((SHW + SPAD) * S, (SHH + SPAD) * S), g = c.getContext('2d'); g.scale(S, S); g.translate(SPAD / 2, SPAD / 2); return [c, g]; }
+function makePane(hot) {                                  // a plain pane of dark glass, struck once near its left end
+  const [c, g] = shCanvas(), r = rng(77), ix = SHW * .15, iy = SHH * .45, ink = a => `rgba(235,242,255,${a})`;
+  const rr = () => { g.beginPath(); g.roundRect(.5, .5, SHW - 1, SHH - 1, 6); };
+  g.save(); g.shadowColor = 'rgba(0,0,0,.9)'; g.shadowBlur = 7 * S; g.shadowOffsetY = 2 * S; rr(); g.fillStyle = '#05060a'; g.fill(); g.restore();
+  const body = g.createLinearGradient(0, 0, 0, SHH); body.addColorStop(0, hot ? 'rgb(44,49,65)' : 'rgb(28,31,42)'); body.addColorStop(1, 'rgb(7,8,13)');
+  rr(); g.fillStyle = body; g.fill();
+  g.save(); rr(); g.clip();
+  const sheen = g.createLinearGradient(0, 0, 0, SHH * .5); sheen.addColorStop(0, 'rgba(255,255,255,.12)'); sheen.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = sheen; g.fillRect(0, 0, SHW, SHH * .5);
+  g.lineJoin = 'round';
+  for (let i = 0; i < 11; i++) {                          // hairline cracks, each with one kink, fading as they run
+    const a = i / 11 * Math.PI * 2 + (r() - .5) * .5, len = 14 + r() * 84, kink = (r() - .5) * .55, m = .3 + r() * .3;
+    const mx = ix + Math.cos(a) * len * m, my = iy + Math.sin(a) * len * m, ex = mx + Math.cos(a + kink) * len * (1 - m), ey = my + Math.sin(a + kink) * len * (1 - m);
+    const gr = g.createLinearGradient(ix, iy, ex, ey); gr.addColorStop(0, ink(hot ? .85 : .5)); gr.addColorStop(1, ink(0));
+    g.strokeStyle = gr; g.lineWidth = .45; g.beginPath(); g.moveTo(ix, iy); g.lineTo(mx, my); g.lineTo(ex, ey); g.stroke();
+  }
+  for (let i = 0; i < 5; i++) { const a = r() * 7, rad = 3.5 + r() * 7; arc(g, ix, iy, rad, a, a + .5 + r() * .7, .4, ink(hot ? .42 : .22)); }
+  g.restore();
+  const edge = g.createLinearGradient(0, 0, SHW, SHH); edge.addColorStop(0, ink(hot ? .95 : .7)); edge.addColorStop(.5, ink(hot ? .34 : .16)); edge.addColorStop(1, ink(hot ? .6 : .36));
+  rr(); g.strokeStyle = edge; g.lineWidth = .8; g.stroke();
+  radial(g, ix, iy, hot ? 8 : 5.5, [[0, WHITE, 1], [.25, [190, 225, 255], .5], [1, [190, 225, 255], 0]]);
+  return c;
+}
+function makeNeon() {                                     // one thin tube in the wordmark's red: unlit, glow, lit
+  const tubeOf = (color, w) => { const [c, g] = shCanvas(); g.beginPath(); g.roundRect(2, 2, SHW - 4, SHH - 4, (SHH - 4) / 2); g.strokeStyle = color; g.lineWidth = w; g.stroke(); return c; };
+  const body = tubeOf('#000', 3), glow = mk(body.width, body.height), g = glow.getContext('2d');
+  softImg(g, body, 6 * S, .45, '#ff1e00'); softImg(g, body, 2.6 * S, .9, '#ff2600'); softImg(g, body, .8 * S, 1, '#ff3c08');
+  return { glow, tube: tubeOf('#fff3e6', 1.5), off: tubeOf('rgba(172,150,150,.42)', 1.5) };
+}
+const STAR = [[-1.9, 8], [-1.2, 4], [-.55, 6.5], [.15, 3.5], [.75, 8.5], [1.5, 4], [2.2, 6], [2.9, 3.5]];   // angle, length
+let panes = [], neon = null, shStyle = 2;
+
+// ---------- state ----------
+const KNOBS = [
+  { label: 'REFLECT', macro: 0, color: [237, 94, 69] },
+  { label: 'VERB',    macro: 7, color: [242, 138, 77] },
+  { label: 'DELAY',   macro: 1, color: [252, 196, 107] },
+  { label: 'ECHO %',  macro: 2, color: [94, 212, 201] },
+  { label: 'ECHO T',  macro: 3, color: [71, 184, 217] },
+  { label: 'WAVY',    macro: 4, color: [102, 148, 235] },
+  { label: 'WOBBLE',  macro: 5, color: [163, 87, 201] },
+  { label: 'COMP',    macro: 6, color: [219, 87, 158] }
+];
+const PRESETS = [
+  { name: 'MIDNIGHT', vals: [82, 68, 69, 65, 64, 64, 0, 41], accent: [77, 140, 242],
+    pal: [[60, 110, 255], [90, 80, 240], [40, 170, 255], [130, 110, 255], [90, 200, 255]], seed: 211 },
+  { name: 'ANGELS', vals: [127, 75.2, 49.96, 52.93, 78.83, 53.06, 43, 97.3], accent: [209, 143, 245],
+    pal: [[255, 130, 200], [255, 200, 120], [200, 150, 255], [255, 170, 90], [255, 80, 150]], seed: 322 },
+  { name: 'GHOSTS', vals: [45.94, 16.37, 80, 66.45, 107.79, 35, 110, 80.56], accent: [102, 219, 153],
+    pal: [[70, 240, 160], [50, 210, 200], [140, 255, 170], [40, 180, 220], [120, 255, 210]], seed: 433 }
+];
+const ICON_PAL = [[255, 60, 40], [255, 60, 40], [255, 140, 50], [255, 200, 90], [60, 220, 230], [70, 120, 255], [240, 70, 170], [150, 90, 255]];
+const palFromHue = h => [hsl(h, 1, .6), hsl(h + 28, 1, .62), hsl(h + 150, .95, .6), hsl(h + 185, 1, .6), hsl(h + 215, .9, .65), hsl(h + 320, 1, .62)];
+// macro index order, 0..127, seeded from the device screenshot
+let vals = [20, 22, 90, 42, 30, 6, 4, 51].map(p => p * 1.27);
+let active = -1, plate = null, energy = 0, hover = { knob: -1, preset: -1, shatter: false }, drag = null, shT = -1, sp = 1;
+
+const A0 = Math.PI * .75, SWEEP = Math.PI * 1.5, UI = '"Avenir Next", "Helvetica Neue", Arial';
+const M = 20, KY = 106, KR = 22, LABEL_Y = 152, WMX = 16, WMY = 28, WMH = 38;
+const kx = i => M + (W - M * 2) / 8 * (i + .5);
+const PILL = { w: 74, h: 26, gap: 4, y: 14, right: 12 };
+const pillX = p => W - PILL.right - (3 - p) * PILL.w - (2 - p) * PILL.gap;
+const wmRight = () => WMX + WM.w / WM.h * WMH;
+const shardRect = () => { const x0 = wmRight() + 14, x1 = pillX(0) - 14; return [x0 + (x1 - x0 - SHW) / 2, PILL.y + PILL.h / 2 - SHH / 2, SHW, SHH]; };
+
+// SHATTER plays for about half a second: the sign flickers and the new plate comes up hot
+const lit = () => sp >= 1 ? 1 : sp < .07 ? .12 : sp < .15 ? 1 : sp < .22 ? .25 : sp < .33 ? 1 : sp < .39 ? .5 : 1;
+const flash = () => Math.max(0, 1 - sp * 2.4);
+
+function draw(g) {
+  g.setTransform(S, 0, 0, S, 0, 0);
+  g.fillStyle = '#030408'; g.fillRect(0, 0, W, H);
+  g.globalAlpha = Math.min(1, .3 + .7 * energy + flash() * .4); g.drawImage(plate.lines, 0, 0, W, H); g.globalAlpha = 1;
+
+  const K = KNOBS.map((k, i) => {
+    const f = vals[k.macro] / 127;
+    return { i, k, f, cx: kx(i), a: A0 + SWEEP * f, hot: hover.knob === i || (drag && drag.knob === i), B: plate.bursts[i] };
+  });
+  for (const { i, f, cx, hot, B } of K) {                // thrown fractures: long, crisp, only as bright as the knob is up
+    const A = Math.min(1, Math.pow(f, 1.4) * (hot ? 1.25 : 1) + flash() * .25);
+    if (A < .01) continue;
+    for (const t of plate.throws[i]) {
+      const x = cx + t.ox, y = KY + t.oy, dx = Math.cos(t.a), dy = Math.sin(t.a), l0 = t.l0 * (.35 + .65 * f), l1 = t.l1 * (.35 + .65 * f);
+      fade(g, x - dx * l0, y - dy * l0, x + dx * l1, y + dy * l1, [[0, t.col, 0], [l0 / (l0 + l1), mix(t.col, WHITE, .3), t.k * A], [1, t.col, 0]], t.lw);
+    }
+  }
+  for (const { f, cx, hot, B } of K) {                   // the burst grows, brightens and turns with the value
+    const sc = .46 + .74 * f + (hot ? .05 : 0), d = BR * 2 * sc;
+    g.save(); g.translate(cx, KY); g.rotate(B.spin * f * 1.7);
+    g.globalAlpha = Math.min(1, Math.pow(f, .75) * 1.08 + (hot ? .1 : 0) + flash() * .3); g.drawImage(B.img, -d / 2, -d / 2, d, d);
+    g.restore();
+  }
+
+  const hd = g.createLinearGradient(0, 0, 0, 60); hd.addColorStop(0, 'rgba(3,4,8,.88)'); hd.addColorStop(.7, 'rgba(3,4,8,.6)'); hd.addColorStop(1, 'rgba(3,4,8,0)');
+  g.fillStyle = hd; g.fillRect(0, 0, W, 60);
+  const sh = g.createLinearGradient(0, 0, W * .5, H * 1.6); sh.addColorStop(0, 'rgba(255,255,255,.05)'); sh.addColorStop(.5, 'rgba(255,255,255,.008)'); sh.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = sh; g.beginPath(); g.moveTo(0, 0); g.lineTo(W * .58, 0); g.lineTo(W * .4, H); g.lineTo(0, H); g.closePath(); g.fill();   // faint rake of light across the glass
+
+  // wordmark: glow breathes with the patch's energy
+  const sw = wm.glow.width / S, shh = wm.glow.height / S, wx = WMX - wm.pad / S, wy = WMY - shh / 2, on = lit();
+  if (on < 1) g.drawImage(wm.off, wx, wy, sw, shh);
+  g.globalAlpha = on * (.66 + .34 * energy); g.drawImage(wm.glow, wx, wy, sw, shh);
+  g.globalAlpha = on; g.drawImage(wm.tube, wx, wy, sw, shh); g.globalAlpha = 1;
+
+  // SHATTER shard (baked sprite, rest + hover)
+  const [sx, sy, sW, sH] = shardRect();
+  const hs = hover.shatter, scx = sx + sW / 2, scy = sy + sH / 2, spr = c => g.drawImage(c, sx - SPAD / 2, sy - SPAD / 2, sW + SPAD, sH + SPAD);
+  if (shStyle === 0) { spr(shards[hs ? 1 : 0]); text(g, 'SHATTER', scx + 3, scy + .5, `600 10.5px ${UI}`, '#fff', 1.6); }
+  else if (shStyle === 1) { spr(panes[hs ? 1 : 0]); text(g, 'SHATTER', scx + 7, scy + .5, `600 9.5px ${UI}`, hs ? '#fff' : 'rgba(232,236,245,.94)', 2.4); }
+  else if (shStyle === 2) {                               // flickers with the sign
+    if (on < 1) spr(neon.off);
+    g.globalAlpha = on * (hs ? 1 : .68); spr(neon.glow); g.globalAlpha = on; spr(neon.tube); g.globalAlpha = 1;
+    text(g, 'SHATTER', scx, scy + .5, `600 9.5px ${UI}`, hs ? '#fff' : 'rgba(255,240,230,.94)', 2.4);
+  } else {                                                // a word like the presets, an impact mark, a line in the plate's colours
+    const ty = PILL.y + PILL.h * .42, ly = PILL.y + PILL.h * .8, tx = scx + 8, mx = scx - 34;
+    for (const [a, len] of STAR) fade(g, mx, ty, mx + Math.cos(a) * len, ty + Math.sin(a) * len, [[0, WHITE, hs ? 1 : .85], [1, WHITE, 0]], .7);
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(mx, ty, 1, 0, 7); g.fill();
+    text(g, 'SHATTER', tx, ty, `600 9.5px ${UI}`, hs ? '#fff' : 'rgba(232,236,245,.94)', 2.4);
+    const pal = plate.pal, stops = pal.map((c, i) => [i / (pal.length - 1), c, hs ? 1 : .8]);
+    g.lineCap = 'round';
+    if (hs) fade(g, tx - 30, ly, tx + 30, ly, stops.map(([t, c]) => [t, c, .28]), 4);
+    fade(g, tx - 30, ly, tx + 30, ly, stops, hs ? 1.8 : 1.3); g.lineCap = 'butt';
+  }
+
+  // presets: a name over a line of its colour
+  for (let p = 0; p < 3; p++) {
+    const x = pillX(p), P = PRESETS[p], on2 = active === p, hv = hover.preset === p, ly = PILL.y + PILL.h * .8, cxp = x + PILL.w / 2;
+    text(g, P.name, cxp, PILL.y + PILL.h * .42, `600 9.5px ${UI}`, on2 ? '#fff' : hv ? 'rgba(232,236,245,.95)' : 'rgba(170,178,194,.72)', 1.6);
+    g.lineCap = 'round';
+    if (on2) [[5, .16], [3.4, .3]].forEach(([lw, al]) => { g.strokeStyle = rgba(P.accent, al); g.lineWidth = lw; g.beginPath(); g.moveTo(cxp - 15, ly); g.lineTo(cxp + 15, ly); g.stroke(); });
+    g.strokeStyle = rgba(P.accent, on2 ? 1 : hv ? .8 : .45); g.lineWidth = on2 ? 1.8 : 1.2;
+    g.beginPath(); g.moveTo(cxp - 15, ly); g.lineTo(cxp + 15, ly); g.stroke();
+  }
+
+  for (const { k, f, cx, a, hot, B } of K) {
+    const r = KR + 6.5, col = mix(k.color, WHITE, .1 + f * .25);
+    arc(g, cx, KY, r, A0, A0 + SWEEP, 1.4, 'rgba(255,255,255,.13)', 'round');
+    if (f > .004) {
+      [[6, .1], [3.6, .22]].forEach(([w, al]) => arc(g, cx, KY, r, A0, a, w, rgba(col, al * (hot ? 1.7 : 1)), 'round'));
+      arc(g, cx, KY, r, A0, a, 1.7, rgba(col, 1), 'round');
+      const ex = cx + Math.cos(a) * r, ey = KY + Math.sin(a) * r;
+      radial(g, ex, ey, 9, [[0, k.color, .7], [1, k.color, 0]]); g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ey, 2.3, 0, 7); g.fill();
+    }
+    g.drawImage(caps[capStyle], cx - KR - CP, KY - KR - CP, (KR + CP) * 2, (KR + CP) * 2);
+    // the cap catches its burst: colour in the dish and around the edge, more as the knob comes up
+    g.save(); g.beginPath(); g.arc(cx, KY, CAPS[capStyle].dish(KR), 0, 7); g.clip();
+    const hi = capLight === 1;
+    radial(g, cx, KY + KR * .55, KR * 1.25, [[0, B.col, hi ? .14 + .6 * f : .08 + .34 * f], [1, B.col, 0]]); g.restore();
+    if (CAPS[capStyle].rim) arc(g, cx, KY, KR - .4, 0, 7, hi ? 1.3 : 1, rgba(mix(B.col, WHITE, .3), hi ? .14 + .8 * f : .08 + .5 * f));
+    if (capLight === 2) {                                 // the arc's colour caught along the cap's top edge, fading at both ends
+      const er = KR - 4.2, ec = mix(B.col, WHITE, .3), gr = g.createLinearGradient(cx - er * .8, 0, cx + er * .8, 0);
+      gr.addColorStop(0, rgba(ec, 0)); gr.addColorStop(.5, rgba(ec, Math.min(1, .35 + .75 * f))); gr.addColorStop(1, rgba(ec, 0));
+      arc(g, cx, KY, er, Math.PI * 1.2, Math.PI * 1.8, 1.6, gr, 'butt');
+    }
+    const pc = mix(WHITE, B.col, .18 * f);
+    g.strokeStyle = rgba(pc, .97); g.lineWidth = 1.9; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * KR * .3, KY + Math.sin(a) * KR * .3); g.lineTo(cx + Math.cos(a) * KR * .74, KY + Math.sin(a) * KR * .74); g.stroke();
+    if (hot) text(g, Math.round(f * 100) + '%', cx, LABEL_Y, `600 11px ${UI}`, rgba(mix(k.color, WHITE, .2), 1), .4);
+    else text(g, k.label, cx, LABEL_Y, `600 9px ${UI}`, rgba(mix([150, 157, 172], [226, 231, 241], Math.min(1, f * 1.3)), .9), 1.7);
+  }
+}
+
+// ---------- loop ----------
+const zoom = document.getElementById('zoom'), actual = document.getElementById('actual');
+const zg = zoom.getContext('2d'), ag = actual.getContext('2d');
+let raf = 0;
+const target = () => vals.reduce((a, b) => a + b, 0) / 8 / 127;
+function frame() {
+  raf = 0;
+  const t = target(); energy += (t - energy) * .16;
+  let busy = false;
+  if (Math.abs(t - energy) < .002) energy = t; else busy = true;
+  sp = shT < 0 ? 1 : Math.min(1, (performance.now() - shT) / 560);
+  if (sp < 1) busy = true;
+  zg.save(); draw(zg); zg.restore();
+  ag.setTransform(1, 0, 0, 1, 0, 0); ag.drawImage(zoom, 0, 0);
+  if (busy) kick();
+}
+function kick() { if (!raf) raf = requestAnimationFrame(frame); }
+
+const plates = {};
+function pickPlate() {                                    // preset plates are fixed; a SHATTER plate is made once and never kept
+  const key = active >= 0 ? 'p' + active : 'icon', P = active >= 0 ? PRESETS[active] : { pal: ICON_PAL, seed: 108 };
+  plate = plates[key] || (plates[key] = makePlate(P.pal, P.seed));
+}
+function shatter(seed) {
+  const r = seed === undefined ? Math.random : rng(seed);
+  active = -1;
+  plate = makePlate(palFromHue(r() * 360), (r() * 1e9) | 0);   // fresh palette and geometry every hit
+  vals = vals.map(() => r() * 127);
+  if (seed === undefined) shT = performance.now();
+}
+
+function pt(e) { const b = e.currentTarget.getBoundingClientRect(); return [(e.clientX - b.left) * W / b.width, (e.clientY - b.top) * H / b.height]; }
+function hit(x, y) {
+  for (let i = 0; i < 8; i++) if (Math.hypot(x - kx(i), y - KY) < KR + 12) return { knob: i };
+  for (let p = 0; p < 3; p++) { const px = pillX(p); if (x >= px && x <= px + PILL.w && y >= PILL.y && y <= PILL.y + PILL.h) return { preset: p }; }
+  const [sx, sy, sW, sH] = shardRect(); if (x >= sx && x <= sx + sW && y >= sy && y <= sy + sH) return { shatter: true };
+  return {};
+}
+for (const c of [zoom, actual]) {
+  c.addEventListener('mousedown', e => {
+    const [x, y] = pt(e), h = hit(x, y);
+    if (h.knob !== undefined) drag = { knob: h.knob, y: e.clientY };
+    else if (h.preset !== undefined) { active = h.preset; vals = PRESETS[active].vals.slice(); pickPlate(); }
+    else if (h.shatter) shatter();
+    kick();
+  });
+  c.addEventListener('mousemove', e => {
+    if (drag) return;
+    const [x, y] = pt(e), h = hit(x, y);
+    hover = { knob: h.knob ?? -1, preset: h.preset ?? -1, shatter: !!h.shatter };
+    c.style.cursor = (h.knob !== undefined) ? 'ns-resize' : (h.preset !== undefined || h.shatter) ? 'pointer' : 'default';
+    kick();
+  });
+  c.addEventListener('mouseleave', () => { if (!drag) { hover = { knob: -1, preset: -1, shatter: false }; kick(); } });
+}
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const m = KNOBS[drag.knob].macro;
+  vals[m] = Math.max(0, Math.min(127, vals[m] + (drag.y - e.clientY) * .7)); drag.y = e.clientY;
+  active = -1; kick();
+});
+window.addEventListener('mouseup', e => {
+  if (drag) { const c = e.target === zoom || e.target === actual ? e.target : null, b = c && c.getBoundingClientRect();
+    const h = c ? hit((e.clientX - b.left) * W / b.width, (e.clientY - b.top) * H / b.height) : {};
+    hover = { knob: h.knob ?? -1, preset: -1, shatter: false }; }
+  drag = null; kick();
+});
+
+(function boot() {
+  wm = makeWordmark(WMH * S); shards = [makeShard(false), makeShard(true)]; caps = CAPS.map((_, i) => makeCap(KR, i));
+  panes = [makePane(false), makePane(true)]; neon = makeNeon();
+  // stills: ?preset=0..2, ?shatter=<seed>, ?hover=<knob>, ?cap=0..4, ?sh=0..3, ?light=0..2
+  const qs = new URLSearchParams(location.search), q = qs.get('preset');
+  if (qs.get('cap') && CAPS[+qs.get('cap')]) capStyle = +qs.get('cap');
+  if (qs.get('sh') && SHATTERS[+qs.get('sh')]) shStyle = +qs.get('sh');
+  if (qs.get('light') && LIGHTS[+qs.get('light')]) capLight = +qs.get('light');
+  const chips = (id, names, get, set) => names.forEach((n, i) => {
+    const b = document.createElement('button'); b.textContent = n; b.className = get() === i ? 'on' : '';
+    b.onclick = () => { set(i); for (const o of b.parentNode.querySelectorAll('button')) o.className = o === b ? 'on' : ''; kick(); };
+    document.getElementById(id).appendChild(b);
+  });
+  chips('pickCap', CAPS.map(c => c.name), () => capStyle, i => capStyle = i);
+  chips('pickSh', SHATTERS, () => shStyle, i => shStyle = i);
+  chips('pickLight', LIGHTS, () => capLight, i => capLight = i);
+  if (q !== null && PRESETS[+q]) { active = +q; vals = PRESETS[active].vals.slice(); }
+  if (qs.get('shatter')) shatter(+qs.get('shatter')); else pickPlate();
+  if (qs.get('hover')) hover = { knob: +qs.get('hover'), preset: -1, shatter: false };
+  energy = target();
+  frame();
+  // the sprite against the icon, same size: icon pixels x2 for retina, on a field of the icon's own red
+  const c = document.getElementById('mywm'), g = c.getContext('2d'), big = makeWordmark(WM.h * 2);
+  const bg = g.createRadialGradient(880, 237, 60, 880, 237, 900); bg.addColorStop(0, '#3a0906'); bg.addColorStop(1, '#0d0508');
+  g.fillStyle = bg; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(big.glow, 100 - big.pad, 100 - big.pad); g.drawImage(big.tube, 100 - big.pad, 100 - big.pad);
+})();
+</script>
+</body>
+</html>

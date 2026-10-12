@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLASS Pulse</title>
+<style>
+  :root { --bg: #1b1c1f; --panel: #232428; --line: #34363c; --ink: #d9dade; --dim: #8b8e96; --hot: #ff4a1f; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; letter-spacing: 0.04em; }
+  .sub { color: var(--dim); margin: 0 0 16px; }
+  .stage { background: #000; border: 1px solid var(--line); border-radius: 4px; padding: 10px; overflow-x: auto; display: flex; gap: 14px; align-items: center; }
+  canvas { display: block; flex: none; }
+  .meter { flex: none; width: 8px; height: 170px; background: #111; border-radius: 2px; position: relative; overflow: hidden; }
+  .meter i { position: absolute; left: 0; right: 0; bottom: 0; background: #555; }
+  .meter b { position: absolute; left: 0; right: 0; bottom: 0; background: var(--hot); opacity: 0.8; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 14px 0 0; }
+  button, select, label.file { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 6px 11px; font: inherit; cursor: pointer; }
+  button.on { border-color: var(--hot); color: #fff; }
+  button.play { min-width: 74px; }
+  label.file input { display: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; margin-top: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; }
+  .card h2 { font-size: 12px; font-weight: 600; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; letter-spacing: 0.05em; }
+  .card h2 input { margin: 0; }
+  .row { display: grid; grid-template-columns: 70px 1fr 46px; gap: 8px; align-items: center; color: var(--dim); }
+  .row output { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--hot); }
+  .note { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  .stat { color: var(--dim); font-variant-numeric: tabular-nums; margin-left: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GLASS PULSE</h1>
+  <p class="sub">Today's face (glass.jsui.js v5.16, browser stand-in) with a level reading added. Silence draws today's face exactly. The face is live: SHATTER, presets and knob drags work (nothing is saved).</p>
+
+  <div class="stage"><canvas id="c"></canvas><div class="meter" title="level read / envelope"><i id="mRaw"></i><b id="mEnv"></b></div></div>
+
+  <div class="bar">
+    <button class="play" id="play">Play</button>
+    <select id="src">
+      <option value="beat">Demo: beat with reverb</option>
+      <option value="sparse">Demo: sparse hits, long tail</option>
+      <option value="guitar">Demo: plucked guitar</option>
+      <option value="pad">Demo: sustained pad</option>
+      <option value="file" disabled>Your file</option>
+    </select>
+    <label class="file">Load audio…<input type="file" id="file" accept="audio/*"></label>
+    <span style="width:12px"></span>
+    <button data-pick="glow">Glow only</button>
+    <button data-pick="plate">Glow + plate</button>
+    <button data-pick="all">Glow + plate + shards</button>
+    <button data-pick="off">Off (today)</button>
+    <span style="width:12px"></span>
+    <select id="sw" title="where the on/off switch sits">
+      <option value="led">Switch: LED left of BACK</option>
+      <option value="mix">Switch: PULSE above MIX</option>
+      <option value="wm">Switch: click the wordmark</option>
+    </select>
+    <button id="zoom">2x</button>
+    <span class="stat" id="stat"></span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2><input type="checkbox" id="gOn"> WORDMARK GLOW</h2>
+      <div class="row"><span>strength</span><input type="range" id="gAmt" min="0" max="1" step="0.01"><output></output></div>
+      <div class="note">A second pass of the sign's glow on top of today's, so the tube stays steady and the halo brightens.</div>
+    </div>
+    <div class="card">
+      <h2><input type="checkbox" id="pOn"> PLATE</h2>
+      <div class="row"><span>strength</span><input type="range" id="pAmt" min="0" max="0.5" step="0.01"><output></output></div>
+      <div class="note">Lifts the glass behind everything. Today it sits at 0.3 + 0.7 × knob energy.</div>
+    </div>
+    <div class="card">
+      <h2><input type="checkbox" id="sOn"> SHARDS</h2>
+      <div class="row"><span>strength</span><input type="range" id="sAmt" min="0" max="1" step="0.01"><output></output></div>
+      <div class="note">All eight knobs' shards lift together, each in proportion to its own brightness: a knob at zero stays dark.</div>
+    </div>
+    <div class="card">
+      <h2>RESPONSE</h2>
+      <div class="row"><span>release</span><input type="range" id="rel" min="60" max="800" step="10"><output></output></div>
+      <div class="row"><span>floor dB</span><input type="range" id="floor" min="-72" max="-18" step="1"><output></output></div>
+      <div class="row"><span>curve</span><input type="range" id="curve" min="0.5" max="3" step="0.1"><output></output></div>
+      <div class="note">Read every 33 ms (like peakamp~ 33). Rises at once, falls over the release. Curve above 1 keeps quiet passages calmer.</div>
+    </div>
+    <div class="card">
+      <h2><input type="checkbox" id="mOn"> FOLLOW MIX</h2>
+      <div class="row"><span>curve</span><input type="range" id="mCurve" min="0.25" max="2" step="0.05"><output></output></div>
+      <div class="note">The strengths above are the pulse at MIX 100; lower MIX scales them as MIX<sup>curve</sup>. Timing stays the same. <span id="mRead"></span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- stand-in for Max's jsui: mgraphics over Canvas2D (trimmed from jsui-standin/harness.html) ----
+const BW = 705, BH = 170;
+const NativeImage = window.Image, SPRITES = {};
+function Pattern(make) { this.stops = []; this.make = make; }
+Pattern.prototype.add_color_stop_rgba = function (t, r, g, b, a) { this.stops.push([t, `rgba(${r * 255},${g * 255},${b * 255},${a})`]); };
+function makeMG(canvas, scale, tag) {
+  const ctx = canvas.getContext('2d');
+  let src = '#000', needBegin = true, cur = [0, 0], tpath = null, font = { face: 'Arial', weight: 400, size: 10 };
+  const begin = () => { if (needBegin) { ctx.beginPath(); needBegin = false; } };
+  const style = () => {
+    if (src instanceof Pattern) { if (src.dead) return 'rgba(0,0,0,0)'; const g = src.make(ctx); for (const [t, c] of src.stops) g.addColorStop(t, c); return g; }
+    if (src && src.el) return tiled();
+    return src;
+  };
+  const tiled = () => { const p = ctx.createPattern(src.el, 'repeat'); p.setTransform(new DOMMatrix().translate(src.x, src.y)); return p; };
+  const setFont = () => { ctx.font = `${font.weight} ${font.size}px "${font.face}"`; };
+  const api = {
+    init() {}, redraw() { if (tag === 'live') schedule(); },
+    _reset() { ctx.setTransform(scale, 0, 0, scale, 0, 0); ctx.globalAlpha = 1; ctx.lineCap = 'butt'; needBegin = true; },
+    set_source_rgba(r, g, b, a) { src = `rgba(${r * 255},${g * 255},${b * 255},${a})`; },
+    set_source(p) { src = p; },
+    set_source_surface(im, x, y) { src = { el: im.el, x, y }; },
+    paint_with_alpha(a) { ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = tiled(); ctx.fillRect(-1e4, -1e4, 2e4, 2e4); ctx.restore(); },
+    fill_with_alpha(a) { ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = style(); ctx.fill(); ctx.restore(); needBegin = true; tpath = null; },
+    image_surface_draw(im) { ctx.drawImage(im.el, 0, 0); },
+    pattern_create_linear(x0, y0, x1, y1) { return new Pattern(c => c.createLinearGradient(x0, y0, x1, y1)); },
+    pattern_create_radial(x0, y0, r0, x1, y1, r1) { const p = new Pattern(c => c.createRadialGradient(x0, y0, r0, x1, y1, r1)); p.dead = tag === 'live'; return p; },   // live: Max draws nothing (measured in Live 10-10)
+    rectangle(x, y, w, h) { begin(); ctx.rect(x, y, w, h); },
+    arc(cx, cy, r, a0, a1) { begin(); ctx.arc(cx, cy, r, a0, a1); },
+    move_to(x, y) { begin(); ctx.moveTo(x, y); cur = [x, y]; },
+    line_to(x, y) { begin(); ctx.lineTo(x, y); },
+    close_path() { ctx.closePath(); },
+    set_line_width(w) { ctx.lineWidth = w; },
+    set_line_cap(m) { ctx.lineCap = m; },
+    fill() { ctx.fillStyle = style(); ctx.fill(); needBegin = true; tpath = null; },
+    stroke() { api.stroke_preserve(); needBegin = true; tpath = null; },
+    stroke_preserve() { ctx.strokeStyle = style(); if (tpath) { setFont(); ctx.lineJoin = 'round'; ctx.strokeText(tpath[0], tpath[1], tpath[2]); } else ctx.stroke(); },
+    save() { ctx.save(); }, restore() { ctx.restore(); },
+    translate(x, y) { ctx.translate(x, y); }, rotate(a) { ctx.rotate(a); }, scale(x, y) { ctx.scale(x, y); },
+    select_font_face(face, slant, weight) { font.face = face; font.weight = weight === 'bold' ? 600 : 400; },
+    set_font_size(s) { font.size = s; },
+    text_measure(s) { setFont(); return [ctx.measureText(s).width, font.size]; },
+    show_text(s) { setFont(); ctx.fillStyle = style(); ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left'; ctx.fillText(s, cur[0], cur[1]); },
+    text_path(s) { tpath = [s, cur[0], cur[1]]; }
+  };
+  return api;
+}
+function JImage(arg) {
+  if (typeof arg === 'string') { const el = SPRITES[arg]; this.el = el || null; this.size = el ? [el.naturalWidth, el.naturalHeight] : [0, 0]; }
+  else { const c = document.createElement('canvas'); c.width = arg._c.width; c.height = arg._c.height; c.getContext('2d').drawImage(arg._c, 0, 0); this.el = c; this.size = [c.width, c.height]; }
+}
+JImage.prototype.freepeer = function () {};
+window.Image = JImage;
+window.MGraphics = function (w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; const m = makeMG(c, 1, 'off'); m._c = c; return m; };
+window.Task = function (fn) { this.fn = fn; this.interval = 0; this.running = false; this.id = 0; };
+Task.prototype.schedule = function (ms) { clearTimeout(this.id); this.id = setTimeout(() => this.fn(), ms); };
+Task.prototype.repeat = function () { this.running = true; clearInterval(this.id); this.id = setInterval(() => this.fn(), this.interval); };
+Task.prototype.cancel = function () { this.running = false; clearInterval(this.id); clearTimeout(this.id); };
+// a rack whose macros take what they are sent and call their observers back, as Live does
+const LIVE = { vals: [20, 22, 90, 42, 30, 6, 4, 51, 100, 0, 0, 0, 0].map(p => p * 1.27), apis: {} };
+window.LiveAPI = function (cb, path) {
+  this.cb = cb; this.property = '';
+  this.path = path === 'this_device' ? '"live_set tracks 0 devices 1 chains 0 devices 0"' : path;
+  const m = /^id (\d+)$/.exec(path); this.slot = m ? +m[1] - 101 : -1;
+  if (this.slot >= 0) LIVE.apis[this.slot] = this;
+};
+LiveAPI.prototype.get = function (k) {
+  if (k === 'parameters') { const a = []; for (let i = 0; i < 17; i++) a.push('id', 100 + i); return a; }
+  return k === 'min' ? [0] : k === 'max' ? [127] : k === 'value' ? [LIVE.vals[this.slot]] : k === 'tempo' ? [120] : k === 'signature_numerator' ? [4] : k === 'signature_denominator' ? [4] : [];
+};
+LiveAPI.prototype.set = function (k, v) { LIVE.vals[this.slot] = v; const me = this; setTimeout(() => { if (me.cb && me.property) me.cb(['value', v]); }, 0); };
+window.post = s => console.log(s.trim());
+window.box = { rect: [0, 0, BW, BH], getboxattr: k => k === 'presentation_rect' ? [0, 0, BW, BH] : undefined };
+window.arrayfromargs = a => Array.prototype.slice.call(a);
+const FILES = {};   // the preset bank lives in memory here; nothing reaches disk
+window.File = function (path, mode) { this.path = path; this.position = 0; this.isopen = mode === 'write' || path in FILES; if (this.isopen && !(path in FILES)) FILES[path] = ''; };
+Object.defineProperty(File.prototype, 'eof', { get() { return (FILES[this.path] || '').length; }, set(v) { FILES[this.path] = FILES[this.path].slice(0, v); } });
+File.prototype.writestring = function (t) { const o = FILES[this.path]; FILES[this.path] = o.slice(0, this.position) + t + o.slice(this.position + t.length); this.position += t.length; };
+File.prototype.readstring = function (n) { const t = FILES[this.path].slice(this.position, this.position + n); this.position += t.length; return t; };
+File.prototype.close = function () { this.isopen = false; };
+window.patcher = { getnamed: () => null };
+
+const canvas = document.getElementById('c');
+canvas.width = BW * 2; canvas.height = BH * 2;
+let zoom = 1;
+function sizeCanvas() { canvas.style.width = BW * zoom + 'px'; canvas.style.height = BH * zoom + 'px'; document.getElementById('zoom').textContent = zoom === 1 ? '2x' : '1x'; }
+sizeCanvas();
+window.mgraphics = makeMG(canvas, 2, 'live');
+let pending = false, paintsThisSec = 0;
+function paintNow() { pending = false; mgraphics._reset(); try { paint(); paintsThisSec++; } catch (e) { console.error(e); } }
+function schedule() { if (!pending) { pending = true; requestAnimationFrame(paintNow); } }
+
+// ---- the pulse: what a "level" message would drive in the device ----
+const PULSE = { env: 0, raw: 0 };
+const SW = { on: true, hover: false };   // the face's on/off switch for the pulse
+function setting(id) { const el = document.getElementById(id); return el.type === 'checkbox' ? el.checked : +el.value; }
+function mixScale() { return setting('mOn') ? Math.pow(knobFrac(MIX), setting('mCurve')) : 1; }
+function amt(on, a) { return SW.on && setting(on) ? setting(a) * PULSE.env * mixScale() : 0; }
+
+function installPulse() {
+  // wordmark: today's three blits, then the glow once more at the pulse
+  window.drawWordmark = function (F) {
+    const on = F.on;
+    if (!(spr.wmGlow && spr.wmTube)) return;
+    const x = WMX - WM_PAD / S, y = WMY - spr.wmTube.size[1] / S / 2;
+    if (on < 1) blit(spr.wmOff, x, y, 1 / S, 1);
+    blit(spr.wmGlow, x, y, 1 / S, on * (0.66 + 0.34 * F.energy));
+    blit(spr.wmGlow, x, y, 1 / S, on * amt('gOn', 'gAmt'));
+    blit(spr.wmTube, x, y, 1 / S, on);
+  };
+  // plate: today's alpha plus the pulse
+  window.drawPlate = function (F) {
+    if (plate && plate.img) blit(plate.img, 0, 0, 1 / S, Math.min(1, 0.3 + 0.7 * F.energy + F.fl * 0.4 + amt('pOn', 'pAmt')));
+  };
+  // shards: all eight knobs' fractures and bursts baked into one image when the knobs settle,
+  // drawn again over today's at the pulse. Only calls the device already makes (bakeLayer's).
+  const own = window.drawOwn, shard = { img: null, key: '' };
+  window.drawOwn = function (F) {
+    own(F);
+    const a = amt('sOn', 'sAmt');
+    if (!plate || a <= 0.003 || shT >= 0) return;
+    let key = plate.id + '|' + F.w;
+    for (let i = 0; i < F.K.length; i++) key += '|' + step(F.K[i].f);
+    if (key !== shard.key) {
+      const mg = new MGraphics(Math.round(F.w * S), DH * S);
+      const K = F.K.map(q => Object.assign({}, q, { hot: false }));
+      others(mg, { K: K, own: -1 }, 0, S);
+      if (shard.img) trash.push(shard.img);
+      shard.img = new Image(mg); shard.key = key;
+    }
+    blit(shard.img, 0, 0, 1 / S, a);
+  };
+  // the switch, option 1: a neon mark in GLIDE's style, word over state, centred over MIX
+  const mix = window.drawMix;
+  window.drawMix = function (F) {
+    mix(F);
+    if (swMode() !== 'mix') return;
+    const cx = kx(MIX, F.w), L = markLook(SW.on, SW.hover);
+    const x = cx - spacedW('PULSE', 6.5, 1.3) / 2;   // GLIDE's layout: word and state from one left edge
+    blit(spr.glGlow[SW.on ? 1 : 0], x - GL_PAD, PULSE_Y - GL_CELL_H / 2, 1 / S, L[2]);   // borrowed from GLIDE for the mock; the device bakes its own
+    spacedFrom('PULSE', x, PULSE_Y - 5.5, 6.5, L[0], L[1], 1.3);
+    spacedFrom(SW.on ? 'ON' : 'OFF', x, PULSE_Y + 5, 8, L[0], L[1], 0.6);
+  };
+  // option 3 (Andrew, 10-11): an LED one SIDE left of the back arrow, as the arrow sits off SHATTER,
+  // in SHATTER's neon (Andrew, 13:18): a small ring of its warm tube over its red glow; off, the
+  // unlit tube's grey, as the button reads when it flickers out. Strokes only: Max draws no radial gradient.
+  const back = window.drawBack;
+  window.drawBack = function (F) {
+    back(F);
+    if (swMode() !== 'led') return;
+    const x = ledX(), y = HCY + 0.5, hv = SW.hover;
+    if (SW.on) {
+      const g = hv ? 1 : 0.68;
+      for (const [w, a] of [[14, 0.05], [10, 0.09], [7, 0.15], [4.5, 0.28], [2.6, 0.4]]) arcStroke(x, y, LED_R, 0, TAU, w, GLOW_RED, a * g);
+      arcStroke(x, y, LED_R, 0, TAU, 1.4, TUBE_INK, 1);
+    } else {
+      arcStroke(x, y, LED_R, 0, TAU, 1.4, OFF_INK, hv ? 0.6 : 0.38);
+    }
+  };
+  // option 2: the sign is the switch; nothing new on the face
+  const click = window.onclick, idle = window.onidle, out = window.onidleout;
+  window.onclick = function (x, y, b, c, sh) {
+    if (typeof x !== 'number') return;   // window.onclick is also the page's DOM click handler
+    if (swHit(x, y)) { SW.on = !SW.on; mgraphics.redraw(); return; }
+    click(x, y, b, c, sh);
+  };
+  window.onidle = function (x, y) {
+    const h = swHit(x, y);
+    if (h !== SW.hover) { SW.hover = h; mgraphics.redraw(); }
+    canvas.style.cursor = h ? 'pointer' : '';
+    idle(x, y);
+  };
+  window.onidleout = function (x, y) { SW.hover = false; canvas.style.cursor = ''; out(x, y); };
+}
+const PULSE_Y = 62, LED_R = 3.6;
+const TUBE_INK = [248 / 255, 240 / 255, 224 / 255], GLOW_RED = [248 / 255, 52 / 255, 0], OFF_INK = [168 / 255, 144 / 255, 144 / 255];   // sampled from SHATTER's neon sprites
+function ledX() { return backX() - 5.8 - SIDE - LED_R - 0.7; }   // the arrow's ink starts 5.8 left of its centre
+function swMode() { return document.getElementById('sw').value; }
+function swHit(x, y) {
+  if (swMode() === 'led') return Math.abs(x - ledX()) < 8 && Math.abs(y - HCY) < 10;
+  if (swMode() === 'mix') { const cx = kx(MIX, W()); return Math.abs(x - cx) < 20 && Math.abs(y - PULSE_Y) < 12; }
+  return x >= WMX && x <= WMX + WMH * WM_W / WM_H && y >= WMY - WMH / 2 - 4 && y <= WMY + WMH / 2 + 4;
+}
+
+// ---- mouse, as Max hands it to the jsui ----
+function at(e) { const r = canvas.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * BW, (e.clientY - r.top) / r.height * BH]; }
+let down = false;
+canvas.addEventListener('mousedown', e => { down = true; const [x, y] = at(e); onclick(x, y, 1, e.metaKey ? 1 : 0, e.shiftKey ? 1 : 0); });
+window.addEventListener('mousemove', e => { const [x, y] = at(e); if (down) ondrag(x, y, 1, e.metaKey ? 1 : 0, e.shiftKey ? 1 : 0); else if (e.target === canvas) onidle(x, y); });
+window.addEventListener('mouseup', e => { if (!down) return; down = false; const [x, y] = at(e); ondrag(x, y, 0, 0, 0); });
+canvas.addEventListener('mouseleave', () => { if (!down) onidleout(0, 0); });
+
+// ---- audio ----
+let ac = null, out = null, an = null, buf = null, playing = false, fileBuf = null, fileNode = null, timer = null, nextT = 0, stepN = 0;
+function setupAudio() {
+  ac = new AudioContext();
+  out = ac.createGain(); out.gain.value = 0.8;
+  an = ac.createAnalyser(); an.fftSize = 2048; buf = new Float32Array(an.fftSize);
+  const verb = ac.createConvolver(), len = ac.sampleRate * 3.2, ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2); }
+  verb.buffer = ir;
+  const wet = ac.createGain(); wet.gain.value = 0.55;
+  window.DRY = ac.createGain(); window.SEND = ac.createGain();
+  DRY.connect(out); SEND.connect(verb); verb.connect(wet); wet.connect(out);
+  out.connect(an); an.connect(ac.destination);
+}
+const noiseBuf = () => { const b = ac.createBuffer(1, ac.sampleRate * 0.5, ac.sampleRate), d = b.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; return b; };
+let NOISE = null;
+const PLUCKS = {};
+function pluckBuf(f) {   // Karplus-Strong, rendered once per pitch
+  if (PLUCKS[f]) return PLUCKS[f];
+  const sr = ac.sampleRate, n = Math.round(sr * 2.2), b = ac.createBuffer(1, n, sr), d = b.getChannelData(0), N = Math.round(sr / f), line = new Float32Array(N);
+  for (let i = 0; i < N; i++) line[i] = Math.random() * 2 - 1;
+  for (let i = 0, j = 0; i < n; i++, j = (j + 1) % N) { const nx = (j + 1) % N; d[i] = line[j]; line[j] = 0.996 * 0.5 * (line[j] + line[nx]); }
+  return PLUCKS[f] = b;
+}
+function voice(t, kind, send) {
+  const g = ac.createGain(); g.connect(DRY); const s = ac.createGain(); s.gain.value = send; g.connect(s); s.connect(SEND);
+  if (kind === 'kick') {
+    const o = ac.createOscillator(); o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.18);
+    g.gain.setValueAtTime(1, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35); o.connect(g); o.start(t); o.stop(t + 0.4);
+  } else if (kind === 'snare' || kind === 'hat') {
+    const n = ac.createBufferSource(); n.buffer = NOISE; const f = ac.createBiquadFilter();
+    f.type = kind === 'hat' ? 'highpass' : 'bandpass'; f.frequency.value = kind === 'hat' ? 7000 : 1800;
+    const peak = kind === 'hat' ? 0.12 : 0.55, dec = kind === 'hat' ? 0.05 : 0.18;
+    g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(0.001, t + dec); n.connect(f); f.connect(g); n.start(t); n.stop(t + dec + 0.05);
+  } else if (kind.startsWith('pluck')) {
+    const n = ac.createBufferSource(); n.buffer = pluckBuf(+kind.slice(6)); n.connect(g); g.gain.value = 0.6; n.start(t);
+  } else if (kind.startsWith('pad')) {
+    const notes = kind === 'pad1' ? [130.81, 196, 246.94, 329.63] : [110, 164.81, 220, 261.63], dur = SIXT * 16;
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.12, t + 1.2); g.gain.setValueAtTime(0.12, t + dur - 0.6); g.gain.linearRampToValueAtTime(0.0001, t + dur + 0.4);
+    for (const fr of notes) for (const det of [-4, 4]) { const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = fr; o.detune.value = det; const lp = ac.createBiquadFilter(); lp.frequency.value = 900; o.connect(lp); lp.connect(g); o.start(t); o.stop(t + dur + 0.5); }
+  } else {   // a chord stab or a struck bell
+    const notes = kind === 'bell' ? [523.25, 783.99, 1046.5] : [220, 261.63, 329.63, 392];
+    const dec = kind === 'bell' ? 1.6 : 0.5;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(kind === 'bell' ? 0.35 : 0.22, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + dec);
+    for (const fr of notes) { const o = ac.createOscillator(); o.type = kind === 'bell' ? 'sine' : 'sawtooth'; o.frequency.value = fr; const lp = ac.createBiquadFilter(); lp.frequency.value = 1800; o.connect(lp); lp.connect(g); o.start(t); o.stop(t + dec + 0.05); }
+  }
+}
+const SIXT = 60 / 120 / 4;
+function tick() {   // schedule a little ahead, sixteenth by sixteenth
+  const pat = document.getElementById('src').value;
+  while (nextT < ac.currentTime + 0.12) {
+    const s = stepN % 32;
+    if (pat === 'beat') {
+      if (s % 4 === 0) voice(nextT, 'kick', 0.05);
+      if (s % 8 === 4) voice(nextT, 'snare', 0.5);
+      if (s % 2 === 0) voice(nextT, 'hat', 0.1);
+      if (s === 0 || s === 14 || s === 22) voice(nextT, 'stab', 0.8);
+    } else if (pat === 'guitar') {   // a picked line over two chords
+      const line = [[0, 164.81], [3, 246.94], [6, 329.63], [8, 196], [10, 293.66], [12, 246.94], [16, 146.83], [19, 220], [22, 293.66], [24, 196], [27, 246.94], [29, 220]];
+      for (const [at, f] of line) if (s === at) voice(nextT, 'pluck ' + f, 0.35);
+      if (s === 0 || s === 16) { voice(nextT, 'pluck 82.41', 0.3); voice(nextT + 0.012, 'pluck 123.47', 0.3); }
+    } else if (pat === 'pad') {
+      if (s === 0) voice(nextT, stepN % 64 < 32 ? 'pad1' : 'pad2', 0.6);
+    } else {
+      if (s === 0) voice(nextT, 'bell', 1);
+      if (s === 12) voice(nextT, 'kick', 0.6);
+      if (s === 20) voice(nextT, 'snare', 1);
+    }
+    nextT += SIXT; stepN++;
+  }
+}
+function start() {
+  if (!ac) setupAudio();
+  if (!NOISE) NOISE = noiseBuf();
+  ac.resume();
+  const pat = document.getElementById('src').value;
+  if (pat === 'file') {
+    if (!fileBuf) return;
+    fileNode = ac.createBufferSource(); fileNode.buffer = fileBuf; fileNode.loop = true; fileNode.connect(out); fileNode.start();
+  } else { nextT = ac.currentTime + 0.05; stepN = 0; timer = setInterval(tick, 25); }
+  playing = true; document.getElementById('play').textContent = 'Stop';
+}
+function stop() {
+  clearInterval(timer); timer = null;
+  if (fileNode) { try { fileNode.stop(); } catch (e) {} fileNode = null; }
+  playing = false; document.getElementById('play').textContent = 'Play';
+}
+document.getElementById('play').onclick = () => playing ? stop() : start();
+document.getElementById('src').onchange = () => { if (playing) { stop(); start(); } };
+document.getElementById('file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!ac) setupAudio();
+  fileBuf = await ac.decodeAudioData(await f.arrayBuffer());
+  const opt = document.querySelector('#src option[value=file]'); opt.disabled = false; opt.textContent = 'Your file: ' + f.name;
+  document.getElementById('src').value = 'file'; if (playing) stop(); start();
+};
+
+// the device's side: a peak read every 33 ms, an envelope, a repaint only while there is something to show
+let lastT = performance.now(), redraws = 0;
+const HOLD = new URLSearchParams(location.search).has('env') ? +new URLSearchParams(location.search).get('env') : null;
+setInterval(() => {
+  const t = performance.now(), dt = t - lastT; lastT = t;
+  let peak = 0;
+  if (an) { an.getFloatTimeDomainData(buf); for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i]); if (v > peak) peak = v; } }
+  const db = peak > 0 ? 20 * Math.log10(peak) : -120, fl = setting('floor');
+  const lin = Math.pow(Math.max(0, Math.min(1, (db - fl) / -fl)), setting('curve'));
+  const before = PULSE.env;
+  PULSE.raw = lin;
+  PULSE.env = lin > PULSE.env ? lin : PULSE.env * Math.exp(-dt / setting('rel') * 2.3);   // falls to a tenth over the release
+  if (PULSE.env < 0.004) PULSE.env = 0;
+  if (HOLD !== null) PULSE.env = HOLD;   // ?env=0.8: hold the envelope still, for checking a frame
+  if (window.LOADED && (PULSE.env > 0 || before > 0)) { mgraphics.redraw(); redraws++; }
+  document.getElementById('mRaw').style.height = lin * 100 + '%';
+  document.getElementById('mEnv').style.height = PULSE.env * 100 + '%';
+  if (window.LOADED) {
+    const c = setting('mCurve'), pc = v => Math.round(Math.pow(v, c) * 100) + '%';
+    document.getElementById('mRead').textContent = 'MIX now ' + Math.round(knobFrac(MIX) * 100) + '% → pulse ' + Math.round(mixScale() * 100) + '%. At 25% MIX: ' + pc(0.25) + ', at 50%: ' + pc(0.5) + '.';
+  }
+}, 33);
+setInterval(() => { document.getElementById('stat').textContent = 'pulse repaints ' + redraws + '/s · paints ' + paintsThisSec + '/s'; redraws = 0; paintsThisSec = 0; }, 1000);
+
+// ---- controls ----
+const DEF = { gAmt: 0.25, pAmt: 0.25, sAmt: 0.35, rel: 250, floor: -50, curve: 1.6, mCurve: 1.05 };   // Andrew's settings, 10-11 12:58
+document.getElementById('mOn').checked = true;
+const PICKS = { glow: [1, 0, 0], plate: [1, 1, 0], all: [1, 1, 1], off: [0, 0, 0] };
+for (const id in DEF) {
+  const el = document.getElementById(id), o = el.nextElementSibling;
+  el.value = DEF[id];
+  const show = () => { o.textContent = id === 'rel' ? el.value + ' ms' : el.value; };
+  el.oninput = show; show();
+}
+function pick(name) {
+  const [g, p, s] = PICKS[name];
+  document.getElementById('gOn').checked = !!g; document.getElementById('pOn').checked = !!p; document.getElementById('sOn').checked = !!s;
+  document.querySelectorAll('[data-pick]').forEach(b => b.classList.toggle('on', b.dataset.pick === name));
+}
+document.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => pick(b.dataset.pick));
+['gOn', 'pOn', 'sOn'].forEach(id => document.getElementById(id).onchange = () => document.querySelectorAll('[data-pick]').forEach(b => b.classList.remove('on')));
+pick('all');
+document.getElementById('sw').onchange = () => { SW.hover = false; mgraphics.redraw(); };
+document.getElementById('zoom').onclick = () => { zoom = zoom === 1 ? 2 : 1; sizeCanvas(); };
+
+// ---- load the sprites, then the device script itself ----
+const names = ['glass-wm-glow', 'glass-wm-tube', 'glass-wm-off', 'glass-neon-glow', 'glass-neon-tube', 'glass-neon-off', 'glass-back-glow'].concat([0, 1, 2, 3, 4, 5, 6].map(i => 'glass-glide-glow-' + i));
+Promise.all(names.map(n => new Promise(ok => { const im = new NativeImage(); im.onload = () => { SPRITES[n + '.png'] = im; ok(); }; im.onerror = ok; im.src = '../sprites/' + n + '.png'; })))
+  .then(() => { const s = document.createElement('script'); s.src = '../glass.jsui.js'; s.onload = () => { installPulse(); schedule(); window.LOADED = true; }; document.body.appendChild(s); });
+</script>
+</body>
+</html>

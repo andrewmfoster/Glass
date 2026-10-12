@@ -1,0 +1,1038 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLASS: back, hold, glide and mix</title>
+<style>
+  html, body { margin: 0; background: #141518; color: #9aa0a8; font: 12px/1.45 "Helvetica Neue", Arial, sans-serif; }
+  main { padding: 28px 32px 64px; width: 1410px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #c9ced6; margin: 34px 0 3px; }
+  h2:first-child { margin-top: 0; margin-bottom: 10px; }
+  .tag { color: #9aa0a8; margin: 14px 0 0; max-width: 980px; font-size: 13px; }
+  canvas { display: block; }
+  #zoom { width: 1410px; height: 340px; }
+  #actual { width: 705px; height: 170px; margin-top: 10px; }
+  .pick { display: flex; align-items: center; gap: 6px; margin: 12px 0 0; }
+  .pick span { width: 112px; font-size: 10px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #c9ced6; }
+  .pick button { font: 600 11px/1 "Helvetica Neue", Arial, sans-serif; color: #9aa0a8; background: #1c1e23; border: 1px solid #2c2f36; border-radius: 4px; padding: 7px 11px; cursor: pointer; }
+  .pick button.on { color: #fff; background: #2b2e36; border-color: #6b7280; }
+</style>
+</head>
+<body>
+<main>
+  <h2>Back, hold, glide and mix</h2>
+  <canvas id="zoom" width="1410" height="340"></canvas>
+  <div class="pick" id="pickLook"><span>Mix knob</span></div>
+  <div class="pick" id="pickSaved"><span>Saved presets</span></div>
+  <p class="tag" id="cap"></p>
+  <h2>Actual size in Live</h2>
+  <canvas id="actual" width="1410" height="340"></canvas>
+</main>
+
+<script>
+// glass-presets-mock.html with version A picked (one bank, three slots), plus four new controls:
+// BACK, HOLD, GLIDE and MIX. The page opens on Andrew's picks; the other variations stay behind query flags.
+// The face is glass-face-blackout.html's picked one (Flat cap, Neon button, top-edge light).
+// Same rule as that file: nothing here goes past what the jsui can do at runtime.
+//   BAKED (drawn once offline, blur allowed, shipped as PNG): wordmark, neon button, knob cap.
+//   LIVE (plain strokes, fills and gradients, no blur, no additive blending): everything else,
+//   the preset list included. The name field stands in for a Max text box laid over the jsui.
+// Baked blur goes through a canvas shadow, not ctx.filter, so Safari draws it too.
+const W = 705, H = 170, S = 2, PW = W * S, PH = H * S;
+
+function rng(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const WHITE = [255, 255, 255];
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.ceil(w); c.height = Math.ceil(h); return c; }
+function hsl(h, s, l) {
+  h = ((h % 360) + 360) % 360 / 360;
+  const q = l < .5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = t => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < .5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  return [f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255];
+}
+function radial(g, x, y, rad, stops) {
+  const gr = g.createRadialGradient(x, y, 0, x, y, rad);
+  for (const [t, c, a] of stops) gr.addColorStop(t, rgba(c, a));
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill();
+}
+function fade(g, x0, y0, x1, y1, stops, lw) {            // a stroke whose alpha runs along its length
+  const gr = g.createLinearGradient(x0, y0, x1, y1);
+  for (const [t, c, a] of stops) gr.addColorStop(t, rgba(c, a));
+  g.strokeStyle = gr; g.lineWidth = lw; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+}
+function arc(g, cx, cy, r, a0, a1, w, style, cap) { g.strokeStyle = style; g.lineWidth = w; g.lineCap = cap || 'butt'; g.beginPath(); g.arc(cx, cy, r, a0, a1); g.stroke(); }
+function text(g, s, x, y, font, fill, ls) {
+  g.font = font; g.letterSpacing = ls + 'px'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = fill;
+  g.fillText(s, x + ls / 2, y);
+}
+// A blurred, single-colour copy of src's shape. blur is a Gaussian sigma in canvas pixels.
+function softImg(g, src, blur, a, color) {
+  const off = src.width + 400;
+  g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = a;
+  g.shadowColor = color; g.shadowBlur = blur * 2; g.shadowOffsetX = off; g.drawImage(src, -off, 0);
+  g.restore();
+}
+
+// ---------- the plate: what one SHATTER makes ----------
+const BR = 96;
+function burstGeo(r, col, pick) {
+  const b = { col, rays: [], wedges: [], spikeA: r() * Math.PI }, dirs = [];
+  for (let k = 4 + (r() * 4 | 0); k--;) dirs.push(r() * 7);   // most rays gather into a few sprays, as on the icon
+  for (let k = 4 + (r() * 4 | 0); k--;) b.wedges.push({ a: r() * 7, da: .05 + r() * .2, len: 38 + r() * 54, col: pick() });
+  for (let k = 150; k--;) b.rays.push({ a: r() < .74 ? dirs[(r() * dirs.length) | 0] + (r() - r()) * .2 : r() * 7, len: 22 + r() * r() * 72, col: pick(), lw: .25 + r() * .5 });
+  return b;
+}
+function renderBurst(b, r) {
+  const c = mk(BR * 2 * S, BR * 2 * S), g = c.getContext('2d'); g.scale(S, S);
+  const x = BR, y = BR;
+  radial(g, x, y, BR, [[0, b.col, .42], [.22, b.col, .2], [.55, b.col, .06], [1, b.col, 0]]);          // stands in for bloom
+  for (const w of b.wedges) {                             // refracted shard wedges
+    const gr = g.createRadialGradient(x, y, 0, x, y, w.len);
+    gr.addColorStop(0, rgba(w.col, .34)); gr.addColorStop(1, rgba(w.col, 0));
+    g.fillStyle = gr; g.beginPath(); g.moveTo(x, y);
+    g.lineTo(x + Math.cos(w.a) * w.len, y + Math.sin(w.a) * w.len); g.lineTo(x + Math.cos(w.a + w.da) * w.len, y + Math.sin(w.a + w.da) * w.len);
+    g.closePath(); g.fill();
+  }
+  for (const q of b.rays) {                               // crack rays, each over a wide faint underlay
+    const ex = x + Math.cos(q.a) * q.len, ey = y + Math.sin(q.a) * q.len;
+    fade(g, x, y, ex, ey, [[0, q.col, .2], [1, q.col, 0]], q.lw * 4.5);
+    fade(g, x, y, ex, ey, [[0, mix(q.col, WHITE, .35), .75], [.14, q.col, .9], [1, q.col, 0]], q.lw);
+  }
+  for (let i = 0; i < 60; i++) {                          // sparks
+    const a = r() * 7, d = 26 + r() * 62, rad = .25 + r() * r() * 1.1, col = r() < .35 ? WHITE : mix(b.col, WHITE, r() * .5);
+    g.fillStyle = rgba(col, (.45 + r() * .55) * (1 - d / BR)); g.beginPath(); g.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, rad, 0, 7); g.fill();
+    if (rad > .85) radial(g, x + Math.cos(a) * d, y + Math.sin(a) * d, rad * 5, [[0, col, .3], [1, col, 0]]);
+  }
+  return c;
+}
+function makePlate(pal, seed) {
+  const r = rng(seed), pick = () => pal[(r() * pal.length) | 0];
+  const P = { lines: null, bursts: [], throws: [], pal };
+  const c = mk(PW, PH), g = c.getContext('2d'); g.scale(S, S);                 // cold glass: faint colour, hairline fractures, dust
+  g.fillStyle = '#030408'; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 12; i++) { const col = pick(); radial(g, r() * W, r() * H, 70 + r() * 170, [[0, col, .03 + r() * .045], [1, col, 0]]); }
+  for (let i = 0; i < 90; i++) {
+    const x = r() * W, y = r() * H, a = r() * Math.PI, l0 = 40 + r() * 380, l1 = 40 + r() * 380;
+    g.strokeStyle = rgba(pick(), .05 + r() * .17); g.lineWidth = .25 + r() * .4;
+    g.beginPath(); g.moveTo(x - Math.cos(a) * l0, y - Math.sin(a) * l0); g.lineTo(x + Math.cos(a) * l1, y + Math.sin(a) * l1); g.stroke();
+  }
+  for (let i = 0; i < 420; i++) { g.fillStyle = rgba(r() < .3 ? WHITE : pick(), (.3 + r() * .5) * .5); g.beginPath(); g.arc(r() * W, r() * H, .2 + r() * r() * 1.05, 0, 7); g.fill(); }
+  P.lines = c;
+  KNOBS.forEach((k, i) => {
+    const col = mix(k.color, pal[i % pal.length], .38), kp = () => r() < .65 ? col : pick();
+    P.bursts.push({ img: renderBurst(burstGeo(r, col, kp), r), col, spin: r() < .5 ? -1 : 1 });
+    const t = [];                                         // fractures this knob throws across the plate when it is up
+    for (let n = 7 + (r() * 4 | 0); n--;) t.push({ a: r() * Math.PI, l0: 50 + r() * r() * 330, l1: 50 + r() * r() * 330, col: kp(), lw: .3 + r() * .5, k: .45 + r() * .55, ox: (r() - .5) * 7, oy: (r() - .5) * 7 });
+    P.throws.push(t);
+  });
+  return P;
+}
+
+// ---------- wordmark sprites (baked) ----------
+// Letterforms measured off 3x crops of the icon (icon/glass-icon-1024.png), in icon pixels,
+// 780 x 136 outer. Each letter is a 32px band with squared ends; a 10px white tube runs along
+// both edges of the band with a 12px red core between. Where the icon's tube does not close
+// (top of the L, the L's foot into the A, the first S's lower-left end) the core runs to the end.
+// Round 2, off 5x crops: the icon's glow is tight and saturated, with a crisp orange-red rim
+// hugging the white and only a low haze beyond it, and its core is one flat colour. Side by side
+// at the same size the tube reads 12 and the core 8; the L's two strands end in round tips; and each
+// letter sits on top of the one before it, so the A's leg closes the L's foot.
+const WM = { w: 780, h: 136, T: 32, tube: 12, pad: 170 };
+function sLetter(x0, openFoot) {
+  return { ends: [[x0 + 150, 16, 1], [x0 + 4, 120, -1]], path: (g, d) => {
+    g.moveTo(x0 + 150 - d, 16); g.lineTo(x0 + 42, 16);
+    g.arc(x0 + 42, 42, 26, -Math.PI / 2, Math.PI / 2, true);
+    g.lineTo(x0 + 108, 68);
+    g.arc(x0 + 108, 94, 26, -Math.PI / 2, Math.PI / 2, false);
+    g.lineTo(x0 + 4 + (openFoot && d === WM.tube ? 0 : d), 120);
+  } };
+}
+const WM_LETTERS = [
+  { ends: [[180, 16, 1], [92, 76.5, -1]], path: (g, d) => {   // G: arm sits below centre, as in the icon
+    g.moveTo(180 - d, 16); g.arcTo(16, 16, 16, 68, 39); g.arcTo(16, 120, 70, 120, 39);
+    g.arcTo(164, 120, 164, 76.5, 20); g.arcTo(164, 76.5, 100, 76.5, 14); g.lineTo(92 + d, 76.5);
+  } },
+  { tips: [[199, 8], [219, 8]],                          // L: open top with a round tip on each strand, foot runs under the A
+    path: (g, d) => { g.moveTo(209, 2 + (d === WM.tube ? 5 : d ? 6 : 0)); g.arcTo(209, 120, 240, 120, 8); g.lineTo(300, 120); } },
+  { clip: true,                                          // A: legs run past the baseline and are cut flat
+    path: (g, d) => { g.moveTo(297.8, 150); g.arcTo(379.5, -2, 461.2, 150, 21); g.lineTo(461.2, 150); },
+    bar: (g, d) => { g.moveTo(338 + d * 1.4, 81); g.lineTo(421 - d * 1.4, 81); } },
+  sLetter(470, true), sLetter(630, false)
+];
+function makeWordmark(hPx) {                              // hPx: letter height in canvas pixels
+  const k = hPx / WM.h, pad = Math.round(WM.pad * k), w = Math.round(WM.w * k), cw = w + pad * 2, ch = Math.round(hPx) + pad * 2;
+  // one pass over every letter: d insets the ends, core marks the red band between the tubes
+  const pass = (o, only) => {
+    const c = mk(cw, ch), ctx = c.getContext('2d'), grow = o.grow || 0;
+    for (const L of only ? [only] : WM_LETTERS) {
+      ctx.save(); ctx.translate(pad, pad); ctx.scale(k, k); ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+      if (L.clip) { ctx.beginPath(); ctx.rect(-60, -grow, WM.w + 120, WM.h - (o.core ? WM.tube : 0) + grow * 2); ctx.clip(); }
+      ctx.strokeStyle = ctx.fillStyle = o.color;
+      ctx.beginPath(); L.path(ctx, o.d); ctx.lineWidth = o.w; ctx.stroke();
+      if (o.caps && L.ends) for (const [ex, ey, dir] of L.ends) {   // the white band stops short, then gets a small-radius end cap
+        ctx.beginPath(); ctx.roundRect(dir > 0 ? ex - 13 : ex, ey - WM.T / 2, 13, WM.T, dir > 0 ? [0, 7, 7, 0] : [7, 0, 0, 7]); ctx.fill();
+      }
+      if (o.caps && L.tips) for (const [tx, ty] of L.tips) { ctx.beginPath(); ctx.arc(tx, ty, WM.tube / 2, 0, 7); ctx.fill(); }
+      if (L.bar) { ctx.beginPath(); L.bar(ctx, o.d); ctx.lineWidth = o.bar; ctx.stroke(); }
+      ctx.restore();
+    }
+    return c;
+  };
+  const band = { d: 6, w: WM.T, caps: true, bar: 20 }, core = { d: WM.tube, w: WM.T - WM.tube * 2, core: true, bar: 4 };
+  const out = { k, pad, w, glow: mk(cw, ch), tube: mk(cw, ch), off: mk(cw, ch) };
+
+  // glow, widest first: low haze, body, tight saturated red, then the crisp rim against the white
+  const body = pass({ d: 0, w: WM.T + 6, grow: 6, bar: 26, color: '#000' });
+  let g = out.glow.getContext('2d');
+  softImg(g, body, 54 * k, .3, '#ff1e00'); softImg(g, body, 25 * k, .5, '#ff2200');
+  softImg(g, body, 10 * k, .92, '#ff2600'); softImg(g, body, 4.5 * k, .9, '#ff3606');
+  softImg(g, pass({ d: 0, w: WM.T + 2, grow: 2, bar: 22, color: '#000' }), 1.2 * k, 1, '#ff3c08');
+
+  // tube: warm white glass around one flat core, as the icon has it
+  g = out.tube.getContext('2d');
+  for (const L of WM_LETTERS) { g.drawImage(pass({ ...band, color: '#fff6ec' }, L), 0, 0); g.drawImage(pass({ ...core, color: '#fb3c0a' }, L), 0, 0); }
+
+  // unlit: what the sign looks like in the frames where the flicker drops it
+  g = out.off.getContext('2d');
+  g.drawImage(pass({ ...band, color: 'rgba(172,150,150,.36)' }), 0, 0);
+  for (const L of WM_LETTERS) g.drawImage(pass({ ...core, color: 'rgb(38,8,6)' }, L), 0, 0);
+  return out;
+}
+let wm = null;
+
+// ---------- knob cap sprite (baked): a dark disc and one fine ring, the burst does the rest ----------
+const CP = 14;                                           // room around the cap for its shadow
+function makeCap(R) {
+  const c = mk((R + CP) * 2 * S, (R + CP) * 2 * S), g = c.getContext('2d');
+  g.scale(S, S); g.translate(R + CP, R + CP);
+  const disc = r => { g.beginPath(); g.arc(0, 0, r, 0, 7); };
+  g.save(); g.shadowColor = 'rgba(0,0,0,.95)'; g.shadowBlur = 6 * 2 * S; g.shadowOffsetY = 4 * S; g.fillStyle = '#000'; disc(R - 1); g.fill(); g.restore();
+  g.fillStyle = '#06070a'; disc(R); g.fill();
+  const ring = g.createLinearGradient(0, -R, 0, R); ring.addColorStop(0, 'rgba(255,255,255,.4)'); ring.addColorStop(1, 'rgba(255,255,255,.14)');
+  disc(R - .6); g.strokeStyle = ring; g.lineWidth = 1; g.stroke();
+  return c;
+}
+let cap = null, capS = null;
+
+// ---------- SHATTER button (baked): one thin tube in the wordmark's red: unlit, glow, lit ----------
+const SPAD = 28, SHW = 104, SHH = 32;
+function shCanvas() { const c = mk((SHW + SPAD) * S, (SHH + SPAD) * S), g = c.getContext('2d'); g.scale(S, S); g.translate(SPAD / 2, SPAD / 2); return [c, g]; }
+function makeNeon() {
+  const tubeOf = (color, w) => { const [c, g] = shCanvas(); g.beginPath(); g.roundRect(2, 2, SHW - 4, SHH - 4, (SHH - 4) / 2); g.strokeStyle = color; g.lineWidth = w; g.stroke(); return c; };
+  const body = tubeOf('#000', 3), glow = mk(body.width, body.height), g = glow.getContext('2d');
+  softImg(g, body, 6 * S, .45, '#ff1e00'); softImg(g, body, 2.6 * S, .9, '#ff2600'); softImg(g, body, .8 * S, 1, '#ff3c08');
+  return { glow, tube: tubeOf('#fff3e6', 1.5), off: tubeOf('rgba(172,150,150,.42)', 1.5) };
+}
+let neon = null;
+// the same recipe at any size: the side buttons and the one long tube of the header variations
+function makeTube(w, h) {
+  const tubeOf = (color, lw) => { const c = mk((w + SPAD) * S, (h + SPAD) * S), g = c.getContext('2d'); g.scale(S, S); g.translate(SPAD / 2, SPAD / 2);
+    g.beginPath(); g.roundRect(2, 2, w - 4, h - 4, (h - 4) / 2); g.strokeStyle = color; g.lineWidth = lw; g.stroke(); return c; };
+  const body = tubeOf('#000', 3), glow = mk(body.width, body.height), g = glow.getContext('2d');
+  softImg(g, body, 6 * S, .45, '#ff1e00'); softImg(g, body, 2.6 * S, .9, '#ff2600'); softImg(g, body, .8 * S, 1, '#ff3c08');
+  return { glow, tube: tubeOf('#fff3e6', 1.5), off: tubeOf('rgba(172,150,150,.42)', 1.5), w, h };
+}
+let tubeB = null, tubeG = null, tubeRig = null;
+
+// ---------- state ----------
+const KNOBS = [
+  { label: 'REFLECT', macro: 0, color: [237, 94, 69] },
+  { label: 'VERB',    macro: 7, color: [242, 138, 77] },
+  { label: 'DELAY',   macro: 1, color: [252, 196, 107] },
+  { label: 'ECHO %',  macro: 2, color: [94, 212, 201] },
+  { label: 'ECHO T',  macro: 3, color: [71, 184, 217] },
+  { label: 'WAVY',    macro: 4, color: [102, 148, 235] },
+  { label: 'WOBBLE',  macro: 5, color: [163, 87, 201] },
+  { label: 'COMP',    macro: 6, color: [219, 87, 158] }
+];
+const STOCK = [
+  { name: 'MIDNIGHT', stock: true, vals: [82, 68, 69, 65, 64, 64, 0, 41], accent: [77, 140, 242],
+    pal: [[60, 110, 255], [90, 80, 240], [40, 170, 255], [130, 110, 255], [90, 200, 255]], seed: 211 },
+  { name: 'ANGELS', stock: true, vals: [127, 75.2, 49.96, 52.93, 78.83, 53.06, 43, 97.3], accent: [209, 143, 245],
+    pal: [[255, 130, 200], [255, 200, 120], [200, 150, 255], [255, 170, 90], [255, 80, 150]], seed: 322 },
+  { name: 'GHOSTS', stock: true, vals: [45.94, 16.37, 80, 66.45, 107.79, 35, 110, 80.56], accent: [102, 219, 153],
+    pal: [[70, 240, 160], [50, 210, 200], [140, 255, 170], [40, 180, 220], [120, 255, 210]], seed: 433 }
+];
+const ICON_PAL = [[255, 60, 40], [255, 60, 40], [255, 140, 50], [255, 200, 90], [60, 220, 230], [70, 120, 255], [240, 70, 170], [150, 90, 255]];
+const palFromHue = h => [hsl(h, 1, .6), hsl(h + 28, 1, .62), hsl(h + 150, .95, .6), hsl(h + 185, 1, .6), hsl(h + 215, .9, .65), hsl(h + 320, 1, .62)];
+const USER_SEEDS = [19, 84, 64, 339, 142];                 // the "five" state: five SHATTERs somebody kept
+const NAME_MAX = 9, HOLD_MS = 700;
+// macro index order, 0..127, seeded from the device screenshot
+let vals = [20, 22, 90, 42, 30, 6, 4, 51].map(p => p * 1.27);
+let glass = { pal: ICON_PAL, seed: 108 }, plate = null, loaded = null;   // loaded: the preset whose knobs are still untouched
+let energy = 0, drag = null, shT = -1, sp = 1;
+const NOHOVER = { knob: -1, slot: -1, zone: '', shatter: false, row: -1, foot: -1, back: false, glide: false, mix: false, hold: -1, grow: -1 };
+let hover = NOHOVER;
+// version a: bank + slotRef (three face slots, each pointing into the bank)
+// version b: bslot (four slots, each holding its own preset or nothing)
+// version c: bank (three stock on the face, the rest behind the pager at stop pg; one past the last is the save stop)
+let version = 'a', saved = 0, bank = [], slotRef = [], bslot = [], pg = 0;
+let list = null, edit = null, hold = null, barDrag = null, blink = 0, wheelAcc = 0;
+// the new controls. mixV: where MIX sits (row, head, edge). holdV: how a knob is held (label, pin).
+// glideV: where the glide word sits (under, beside).
+let mixV = 'row', holdV = 'label', glideV = 'beside';     // Andrew's picks, 10-10: the ninth knob, the label, beside SHATTER
+let mixLook = 'apart';                                    // what sets the ninth knob apart from the eight: plain, apart, hollow, small
+let wet = 127, held = KNOBS.map(() => false), glide = 0, hist = [], anim = null;
+const GLIDES3 = [{ name: 'OFF', ms: 0 }, { name: '1 BEAT', ms: 500 }, { name: '1 BAR', ms: 2000 }];   // at 120 bpm
+const GLIDES7 = [{ name: 'OFF', ms: 0 }, { name: '1/8', ms: 250 }, { name: '1/4', ms: 500 }, { name: '1/2', ms: 1000 }, { name: '1 BAR', ms: 2000 }, { name: '2 BARS', ms: 4000 }, { name: '4 BARS', ms: 8000 }];
+let GLIDES = GLIDES7;                                     // Andrew's pick, 10-10: seven lengths; ?gls=3 brings back the first three
+// the header variations. headV: how back, SHATTER and glide sit together (bare, buttons, wings, tube). Andrew's picks, 10-10: bare, a list.
+// glidePick: how a length is chosen (step: a click steps on and a drag runs through them; list: a click opens a list).
+let headV = 'bare', glidePick = 'list', glist = false;
+// room: how the wings rig gets air. tight: as first drawn; wide: the three slots move right and narrow; tall: the rails stand taller; both.
+let room = 'tight';
+const roomW = () => headV === 'wings' && (room === 'wide' || room === 'both'), roomH = () => headV === 'wings' && (room === 'tall' || room === 'both');
+const HIST_MAX = 16, NEUTRAL = [232, 236, 245];
+
+const A0 = Math.PI * .75, SWEEP = Math.PI * 1.5, UI = '"Avenir Next", "Helvetica Neue", Arial';
+const M = 20, KY = 106, KR = 22, LABEL_Y = 152, WMX = 16, WMY = 28, WMH = 38;
+const NK = () => mixV === 'row' ? 9 : 8;                   // a ninth knob squeezes the row; the edge bar takes 14 px off its right
+const APART = 96;                                         // the room MIX takes at the end of the row when it is set apart
+const apart = () => mixV === 'row' && mixLook === 'apart';
+const kx = i => apart() ? (i < 8 ? M + (W - M * 2 - APART) / 8 * (i + .5) : W - M - 34) : M + (W - M * 2 - (mixV === 'edge' ? 14 : 0)) / NK() * (i + .5);
+const MR = () => mixV === 'row' && mixLook === 'small' ? 15 : KR;   // the ninth knob's cap radius
+const PILL = { h: 26, y: 14 }, TY = PILL.y + PILL.h * .42, LY = PILL.y + PILL.h * .8, DIM = [150, 157, 172];
+function layout() {                                       // the header's slots, left to right; all end 12 px from the right edge
+  if (version === 'b') return [0, 1, 2, 3].map(i => ({ x: 385 + i * 78, w: 74 }));
+  if (version === 'c') return [0, 1, 2].map(i => ({ x: 387 + i * 70, w: 66 })).concat({ x: 597, w: 96, pager: true });
+  if (roomW()) return [0, 1, 2].map(i => ({ x: 483 + i * 71, w: 68 }));
+  return [0, 1, 2].map(i => ({ x: 463 + i * 78, w: 74 }));
+}
+const wmRight = () => WMX + WM.w / WM.h * WMH;
+// the header between the wordmark and the slots: the back arrow hangs on SHATTER's left; the glide
+// word and the MIX knob sit on its right when their versions put them there. SHATTER stays centred
+// until the right side needs more room than half the gap, then it gives way to the left.
+const BACK_W = 18, GL_W = 36, MK_W = 22, GAP = 7, HCY = PILL.y + PILL.h / 2;
+const SIDE = 10, BACK_INK = 6.45;                         // bare header: the arrow's ink and the glide text each stop SIDE px off SHATTER's box; the arrow's ink reaches BACK_INK right of its centre
+const BTN = { back: 26, glide: 56, gap: 5, h: 24 }, RIG = { back: 30, glide: 62, w: 196 }, WING = { h: 10, pad: 8 };
+function header() {
+  const x0 = wmRight() + 14, x1 = layout()[0].x - 14, right = [];
+  if (headV === 'buttons') {                              // three tubes in a row, SHATTER the tall one
+    const s = x0 + (x1 - x0 - (BTN.back + BTN.gap * 2 + SHW + BTN.glide)) / 2;
+    return { back: [s, BTN.back], shatter: [s + BTN.back + BTN.gap, SHW], glide: [s + BTN.back + SHW + BTN.gap * 2, BTN.glide] };
+  }
+  if (headV === 'wings' && room !== 'tight') {            // the whole rig centred in its gap; with the slots moved over, the cells widen
+    const wide = roomW(), bw = wide ? 22 : BACK_W, gw = wide ? 46 : GL_W, pad = wide ? 10 : WING.pad;
+    const s = x0 + (x1 - x0 - (pad * 2 + bw + gw + GAP * 2 + SHW)) / 2;
+    return { back: [s + pad, bw], shatter: [s + pad + bw + GAP, SHW], glide: [s + pad + bw + GAP * 2 + SHW, gw], pad };
+  }
+  if (headV === 'tube') {                                 // one tube, three cells
+    const s = x0 + (x1 - x0 - RIG.w) / 2;
+    return { rig: [s, RIG.w], back: [s + 3, RIG.back - 3], shatter: [s + RIG.back, SHW], glide: [s + RIG.back + SHW, RIG.glide - 4] };
+  }
+  if (glideV === 'beside') right.push(['glide', GL_W]);
+  if (mixV === 'head') right.push(['mix', MK_W]);
+  const need = right.reduce((a, it) => a + GAP + it[1], SIDE - GAP), half = (x1 - x0 - SHW) / 2;
+  const sx = x0 + half - Math.max(0, need - half), R = { shatter: [sx, SHW], back: [sx - SIDE - BACK_INK - BACK_W / 2, BACK_W] };
+  let x = sx + SHW + SIDE - GAP; for (const [k, w] of right) { R[k] = [x + GAP, w]; x += GAP + w; }
+  if (glideV === 'under') R.glide = [sx + SHW / 2 - 40, 80];
+  return R;
+}
+const shardRect = () => [header().shatter[0], HCY - SHH / 2, SHW, SHH];
+const GLY = HCY + SHH / 2 + 8;                            // the glide word's line when it sits under SHATTER
+const EDGE = { x: W - 13, y0: 64, y1: 138 };              // the MIX bar
+const mixHead = () => { const [x, w] = header().mix; return [x + w / 2, HCY - 3]; };
+const pinY = KY + KR + 6.5;                               // the hold shard sits in the gap at the bottom of a knob's ring
+const LIST = { w: 168, row: 17, max: 6, foot: 20, y: PILL.y + PILL.h + 2 };
+function listRect() {
+  const rows = Math.min(bank.length, LIST.max);
+  return { x: Math.min(layout()[list.slot].x, W - 8 - LIST.w), y: LIST.y, w: LIST.w, rows, h: rows * LIST.row + LIST.foot + 2 };
+}
+const GLIST = { w: 66, row: 15 };
+function glistRect() {                                    // bare header: the rows start on the glide text's own left edge
+  const [x, w] = header().glide, lx = headV === 'bare' && glideV === 'beside' ? x - 10 : x + w / 2 - GLIST.w / 2;
+  return { x: Math.min(lx, W - 8 - GLIST.w), y: LIST.y, w: GLIST.w, h: GLIDES.length * GLIST.row + 2 };
+}
+const maxScroll = () => Math.max(0, bank.length - LIST.max);
+function editRect() { const L = layout()[edit.slot]; return L.pager ? [L.x + 16, PILL.y + 2, L.w - 32, 15] : [L.x + 1, PILL.y + 2, L.w - 2, 15]; }
+
+// ---------- the bank ----------
+// A saved preset keeps the knob values and the glass it was saved on (palette and seed), so a
+// SHATTER comes back the same. Its accent is the first palette colour.
+const plates = {};                                       // plates of saved presets, by seed; a bare SHATTER plate is never kept
+const clone = P => ({ ...P, vals: P.vals.slice() });
+function glassFrom(r) { const pal = palFromHue(r() * 360), seed = (r() * 1e9) | 0; return { pal, seed, vals: KNOBS.map(() => r() * 127) }; }
+function userPreset(n) { const G = glassFrom(rng(USER_SEEDS[n - 1])); return { name: 'USER ' + n, vals: G.vals, accent: G.pal[0], pal: G.pal, seed: G.seed }; }
+function setGlass(pal, seed) { glass = { pal, seed }; plate = plates[seed] || makePlate(pal, seed); }
+// where the knobs are heading: mid-glide that is the glide's end, not the frame on screen
+const aim = () => anim ? vals.map((v, m) => anim.free[m] ? v : anim.to[m]) : vals.slice();
+function moveTo(v) {                                      // jump, or glide there when GLIDE is on
+  if (GLIDES[glide].ms) anim = { from: vals.slice(), to: v.slice(), t0: performance.now(), dur: GLIDES[glide].ms, free: {} };
+  else { vals = v.slice(); anim = null; }
+}
+// BACK: SHATTERs and preset loads, glass included. Knob drags stay with Live's own undo.
+function pushHist() { hist.push({ vals: aim(), glass, plate, loaded }); if (hist.length > HIST_MAX) hist.shift(); }
+function back() { const h = hist.pop(); if (!h) return; glass = h.glass; plate = h.plate; loaded = h.loaded; moveTo(h.vals); }
+function load(P) { if (!P) return; moveTo(P.vals); setGlass(P.pal, P.seed); plates[P.seed] = plate; loaded = P; }
+function snapshot(name) { plates[glass.seed] = plate; return { name, vals: aim(), accent: glass.pal[0], pal: glass.pal, seed: glass.seed }; }
+function nextUser() { for (let n = 1; ; n++) if (!bank.some(P => P.name === 'USER ' + n)) return 'USER ' + n; }
+function saveNew() { const P = snapshot(nextUser()); bank.push(P); loaded = P; return P; }
+function saveInto(s) { const P = snapshot('USER ' + (s + 1)); bslot[s] = P; loaded = P; openEdit(P, s); }
+function remove(P) {                                      // stock presets stay; a slot that held P goes back to its stock one
+  const i = bank.indexOf(P); if (i < 3) return;
+  bank.splice(i, 1); slotRef = slotRef.map((Q, s) => Q === P ? bank[s] : Q);
+  if (loaded === P) loaded = null;
+}
+function shatter(seed) {                                  // fresh palette and geometry every hit
+  const G = glassFrom(seed === undefined ? Math.random : rng(seed)), now = aim();
+  loaded = null; glass = { pal: G.pal, seed: G.seed }; plate = makePlate(G.pal, G.seed);
+  KNOBS.forEach((k, i) => { if (held[i]) G.vals[k.macro] = now[k.macro]; });   // a held knob stays where it is
+  moveTo(G.vals);
+  if (seed === undefined) shT = performance.now();
+}
+function reset() {
+  const users = saved ? USER_SEEDS.map((_, i) => userPreset(i + 1)) : [];
+  bank = STOCK.map(clone).concat(users); slotRef = bank.slice(0, 3);
+  bslot = saved ? users.slice(0, 4) : bank.slice(0, 3).concat([null]);   // four slots is version b's whole bank
+  pg = 0; loaded = null; list = null; hold = null; hist = []; closeEdit();
+}
+function openEdit(P, slot) { closeEdit(true); list = null; edit = { P, slot, text: P.name, sel: true, t0: performance.now() }; blink = setInterval(kick, 500); }
+function closeEdit(keep) {                                // an empty name keeps the old one
+  if (!edit) return;
+  const t = edit.text.trim(); if (keep && t) edit.P.name = t;
+  clearInterval(blink); edit = null;
+}
+
+// SHATTER plays for about half a second: the sign flickers and the new plate comes up hot
+const lit = () => sp >= 1 ? 1 : sp < .07 ? .12 : sp < .15 ? 1 : sp < .22 ? .25 : sp < .33 ? 1 : sp < .39 ? .5 : 1;
+const flash = () => Math.max(0, 1 - sp * 2.4);
+
+function textL(g, s, x, y, font, fill, ls) { g.font = font; g.letterSpacing = ls + 'px'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillStyle = fill; g.fillText(s, x, y); }
+function fitText(g, s, cx, y, maxW, fill) {              // a slot name: gives up letter-spacing first, then size, so nine wide letters still fit
+  let px = 9.5, ls = 1.6;
+  const w = () => { g.font = `600 ${px}px ${UI}`; g.letterSpacing = ls + 'px'; return g.measureText(s).width - ls; };
+  while (w() > maxW && ls > .3) ls = Math.max(.2, ls - .35);
+  while (w() > maxW && px > 6.5) px -= .5;
+  text(g, s, cx, y, `600 ${px}px ${UI}`, fill, ls);
+}
+function slotLine(g, cx, acc, on, hv) {                   // the line of a preset's colour under its name
+  g.lineCap = 'round';
+  if (on) [[5, .16], [3.4, .3]].forEach(([lw, al]) => { g.strokeStyle = rgba(acc, al); g.lineWidth = lw; g.beginPath(); g.moveTo(cx - 15, LY); g.lineTo(cx + 15, LY); g.stroke(); });
+  g.strokeStyle = rgba(acc, on ? 1 : hv ? .8 : .45); g.lineWidth = on ? 1.8 : 1.2;
+  g.beginPath(); g.moveTo(cx - 15, LY); g.lineTo(cx + 15, LY); g.stroke();
+  g.lineCap = 'butt';
+}
+function drawSlots(g) {
+  const REST = 'rgba(170,178,194,.72)', HOT = 'rgba(232,236,245,.95)';
+  layout().forEach(({ x, w, pager }, i) => {
+    const cx = x + w / 2, hv = hover.slot === i, z = hv ? hover.zone : '', naming = edit && edit.slot === i;
+    if (pager) {                                          // chevron, name, chevron
+      const users = bank.slice(3), P = users[pg], on = !!P && loaded === P, cy = PILL.y + PILL.h * .46;
+      const chev = (ax, dir, live, hot) => {
+        g.strokeStyle = `rgba(232,236,245,${!live ? .16 : hot ? 1 : .6})`; g.lineWidth = 1.2; g.lineCap = g.lineJoin = 'round';
+        g.beginPath(); g.moveTo(ax - 2 * dir, cy - 4); g.lineTo(ax + 2 * dir, cy); g.lineTo(ax - 2 * dir, cy + 4); g.stroke(); g.lineCap = 'butt';
+      };
+      chev(x + 8, -1, pg > 0, z === 'prev'); chev(x + w - 8, 1, pg < users.length, z === 'next');
+      if (!naming) fitText(g, P ? P.name : 'SAVE NEW', cx, TY, w - 36, on ? '#fff' : z === 'name' ? HOT : REST);
+      slotLine(g, cx, P ? P.accent : DIM, on, z === 'name');
+      return;
+    }
+    const P = version === 'a' ? slotRef[i] : version === 'b' ? bslot[i] : bank[i], on = !!P && loaded === P;
+    if (!naming) fitText(g, P ? P.name : 'EMPTY', cx, TY, w - 6, on ? '#fff' : z === 'name' ? HOT : P ? REST : 'rgba(170,178,194,.34)');
+    slotLine(g, cx, P ? P.accent : DIM, on, hv);
+    if (version === 'a' && (hv || (list && list.slot === i))) {   // the caret: at the end of the colour line, flips while the list is open
+      const open = list && list.slot === i, ax = cx + 24, d = open ? -1 : 1;
+      g.fillStyle = open || z === 'caret' ? '#fff' : 'rgba(170,178,194,.75)';
+      g.beginPath(); g.moveTo(ax - 3.2, LY - 1.6 * d); g.lineTo(ax + 3.2, LY - 1.6 * d); g.lineTo(ax, LY + 2.2 * d); g.closePath(); g.fill();
+    }
+    if (hold && hold.slot === i && !hold.done) {          // hold to save: the line fills in the colour the slot is about to get
+      const t = Math.min(1, (performance.now() - hold.t0) / HOLD_MS), acc = mix(glass.pal[0], WHITE, .25);
+      g.lineCap = 'round';
+      [[5, .22], [2.2, 1]].forEach(([lw, al]) => { g.strokeStyle = rgba(acc, al); g.lineWidth = lw; g.beginPath(); g.moveTo(cx - 15, LY); g.lineTo(cx - 15 + 30 * t, LY); g.stroke(); });
+      g.lineCap = 'butt';
+    }
+  });
+}
+function drawList(g) {                                    // version a's bank, drawn inside the face; it covers the knobs while open
+  const R = listRect(), cur = slotRef[list.slot], n = bank.length, scrolls = n > R.rows;
+  g.fillStyle = '#05060a'; g.beginPath(); g.roundRect(R.x, R.y, R.w, R.h, 3); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,.2)'; g.lineWidth = 1; g.beginPath(); g.roundRect(R.x + .5, R.y + .5, R.w - 1, R.h - 1, 3); g.stroke();
+  for (let v = 0; v < R.rows; v++) {
+    const i = list.scroll + v, P = bank[i], y = R.y + 1 + v * LIST.row, my = y + LIST.row / 2, mark = P === cur, hv = hover.row === i;
+    if (mark && list.arm) { g.fillStyle = 'rgba(255,60,40,.22)'; g.fillRect(R.x + 1, y, R.w - 2, LIST.row); }   // the one about to go
+    else if (hv) { g.fillStyle = 'rgba(255,255,255,.09)'; g.fillRect(R.x + 1, y, R.w - 2, LIST.row); }
+    g.fillStyle = rgba(P.accent, 1); g.beginPath(); g.arc(R.x + 11, my, 2.4, 0, 7); g.fill();
+    textL(g, P.name, R.x + 21, my + .5, `600 9.5px ${UI}`, mark || hv ? '#fff' : 'rgba(190,197,210,.85)', 1.4);
+    if (mark) {                                           // the one this slot holds
+      const tx = R.x + R.w - (scrolls ? 21 : 14);
+      g.strokeStyle = rgba(mix(P.accent, WHITE, .35), 1); g.lineWidth = 1.4; g.lineCap = g.lineJoin = 'round';
+      g.beginPath(); g.moveTo(tx - 3.5, my); g.lineTo(tx - 1, my + 2.6); g.lineTo(tx + 3.5, my - 3); g.stroke(); g.lineCap = 'butt';
+    }
+  }
+  const fy = R.y + 1 + R.rows * LIST.row;
+  if (scrolls) {
+    const th = R.rows * LIST.row - 4, bx = R.x + R.w - 6;
+    g.fillStyle = 'rgba(255,255,255,.08)'; g.fillRect(bx, R.y + 3, 2, th);
+    g.fillStyle = 'rgba(255,255,255,.5)'; g.fillRect(bx, R.y + 3 + th * list.scroll / n, 2, th * R.rows / n);
+  }
+  g.fillStyle = 'rgba(255,255,255,.14)'; g.fillRect(R.x + 1, fy, R.w - 2, 1);
+  ['SAVE NEW', 'RENAME', 'DELETE'].forEach((s, k) => {
+    const live = k === 0 || !cur.stock, hv = live && hover.foot === k, ask = k === 2 && list.arm;
+    text(g, ask ? 'CONFIRM' : s, R.x + R.w / 3 * (k + .5), fy + LIST.foot / 2 + 1, `600 8px ${UI}`, !live ? 'rgba(170,178,194,.26)' : ask ? (hv ? '#ffb7a3' : '#ff6746') : hv ? '#fff' : 'rgba(214,220,232,.86)', 1.2);
+  });
+}
+function drawEdit(g) {                                    // a plain box, Arial, no letter-spacing: what a Max text box would give
+  const [x, y, w, h] = editRect();
+  g.fillStyle = '#0d0e12'; g.fillRect(x, y, w, h);
+  g.strokeStyle = 'rgba(255,255,255,.75)'; g.lineWidth = 1; g.strokeRect(x + .5, y + .5, w - 1, h - 1);
+  g.save(); g.beginPath(); g.rect(x + 1, y + 1, w - 2, h - 2); g.clip();
+  g.font = '10px Arial'; g.letterSpacing = '0px'; g.textAlign = 'left'; g.textBaseline = 'middle';
+  const tw = g.measureText(edit.text).width, tx = x + 3.5 + Math.min(0, w - 9 - tw);
+  if (edit.sel && edit.text) { g.fillStyle = 'rgba(70,130,235,.7)'; g.fillRect(tx - .5, y + 2, tw + 1, h - 4); }
+  g.fillStyle = '#fff'; g.fillText(edit.text, tx, y + h / 2 + .5);
+  if (!edit.sel && ((performance.now() - edit.t0) / 500 | 0) % 2 === 0) g.fillRect(tx + tw + .5, y + 3, 1, h - 6);
+  g.restore();
+}
+
+function drawGlist(g) {                                   // the glide lengths as a short list, the preset list's look
+  const R = glistRect();
+  g.fillStyle = '#05060a'; g.beginPath(); g.roundRect(R.x, R.y, R.w, R.h, 3); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,.2)'; g.lineWidth = 1; g.beginPath(); g.roundRect(R.x + .5, R.y + .5, R.w - 1, R.h - 1, 3); g.stroke();
+  GLIDES.forEach((G, i) => {
+    const y = R.y + 1 + i * GLIST.row, my = y + GLIST.row / 2, mark = i === glide, hv = hover.grow === i;
+    if (hv) { g.fillStyle = 'rgba(255,255,255,.09)'; g.fillRect(R.x + 1, y, R.w - 2, GLIST.row); }
+    textL(g, G.name, R.x + 10, my + .5, `600 8.5px ${UI}`, mark || hv ? '#fff' : 'rgba(190,197,210,.85)', 1.2);
+    if (mark) { const tx = R.x + R.w - 11;
+      g.strokeStyle = 'rgba(255,214,198,1)'; g.lineWidth = 1.4; g.lineCap = g.lineJoin = 'round';
+      g.beginPath(); g.moveTo(tx - 3.5, my); g.lineTo(tx - 1, my + 2.6); g.lineTo(tx + 3.5, my - 3); g.stroke(); g.lineCap = 'butt'; }
+  });
+}
+function drawWings(g) {                                   // a hairline rail out of each end of SHATTER's tube: back rides the left one, glide the right
+  const Hd = header(), sx = Hd.shatter[0], hh = roomH() ? 13 : WING.h, pad = Hd.pad || WING.pad, cr = (SHH - 4) / 2, dx = Math.sqrt(cr * cr - hh * hh);
+  const ends = [[Hd.back[0] - pad, sx + 2 + cr, -1], [Hd.glide[0] + Hd.glide[1] + pad, sx + SHW - 2 - cr, 1]];
+  for (const [xe, cc, dir] of ends) {                     // xe: the rail's far end; cc: the centre of the tube's end cap it runs into
+    const xj = cc + dir * dx, ce = xe - dir * hh, th = Math.asin(hh / cr);
+    const outer = () => { g.moveTo(xj, HCY - hh); g.lineTo(ce, HCY - hh); g.arc(ce, HCY, hh, -Math.PI / 2, Math.PI / 2, dir < 0); g.lineTo(xj, HCY + hh); };
+    g.beginPath(); outer();                               // the fill stops at the tube's own curve, so the inside of SHATTER stays clear
+    if (dir < 0) g.arc(cc, HCY, cr, Math.PI - th, Math.PI + th, false); else g.arc(cc, HCY, cr, th, -th, true);
+    g.closePath(); g.fillStyle = 'rgba(3,4,8,.55)'; g.fill();
+    g.beginPath(); outer(); g.strokeStyle = 'rgba(255,226,214,.3)'; g.lineWidth = 1; g.lineCap = 'butt'; g.stroke();
+  }
+}
+const putTube = (g, T, c, x) => g.drawImage(c, x - SPAD / 2, HCY - T.h / 2 - SPAD / 2, T.w + SPAD, T.h + SPAD);
+function drawSideTube(g, T, x, live, hv, on) {            // a side button: unlit glass until it has something to do
+  if (!live || on < 1) putTube(g, T, T.off, x);
+  if (!live) return;
+  g.globalAlpha = on * (hv ? .8 : .42); putTube(g, T, T.glow, x); g.globalAlpha = on * (hv ? 1 : .85); putTube(g, T, T.tube, x); g.globalAlpha = 1;
+}
+// the marks' colour on the bare header. white: as the device draws them. neon: the pill's own recipe, unlit glass
+// until there is something to show. red: the sign's red as flat ink. hover: white at rest, red glow under the pointer.
+let tint = 'neon';                                        // Andrew's pick, 10-10; the device still draws white until the port
+let mixTint = 'white';                                    // the MIX knob stays white (Andrew, 10-10: one quiet space on the face); ?mixc=neon still draws the sign's neon
+const NEON_C = [255, 46, 8], TUBE_C = [255, 243, 230];
+const TUBE_INK = '#fff3e6', UNLIT = 'rgba(172,150,150,.55)', RED_INK = [255, 84, 48];
+const tinted = () => headV === 'bare' && glideV === 'beside' && tint !== 'white';
+const glows = {};                                         // a mark's red glow, blurred once per shape; in the device each would be a baked sprite
+function markGlow(key, paintIt) {
+  if (glows[key]) return glows[key];
+  const body = mk(PW, PH), bg = body.getContext('2d'); bg.scale(S, S); paintIt(bg, '#000');
+  const c = mk(PW, PH), g = c.getContext('2d');
+  softImg(g, body, 5 * S, .45, '#ff1e00'); softImg(g, body, 2.2 * S, .9, '#ff2600'); softImg(g, body, .7 * S, 1, '#ff3c08');
+  return glows[key] = c;
+}
+function markLook(lit, hv) {                              // [ink, glow strength] for a mark that has something to show (lit) and is under the pointer (hv)
+  if (tint === 'neon') return lit ? [hv ? '#fff' : TUBE_INK, hv ? 1 : .68] : [hv ? 'rgba(255,243,230,.85)' : UNLIT, hv ? .55 : 0];
+  if (tint === 'red') return lit ? [rgba(hv ? mix(RED_INK, WHITE, .4) : RED_INK, 1), hv ? 1 : 0] : [rgba(RED_INK, hv ? .9 : .5), hv ? .55 : 0];
+  return lit ? [hv ? TUBE_INK : 'rgba(255,240,230,.94)', hv ? 1 : 0] : [hv ? TUBE_INK : 'rgba(170,178,194,.62)', hv ? .7 : 0];
+}
+function putGlow(g, c, a) { if (a > 0) { g.globalAlpha = a; g.drawImage(c, 0, 0, W, H); g.globalAlpha = 1; } }
+function backPath(g, style) {                             // a U-turn: a straight run into the head on the left, the line curling back under on the right
+  const [x, w] = header().back, cx = x + w / 2, cy = HCY + .5, tx = cx - 5.8, ty = cy - 1.7, r = 3.3, ax = cx + 2.4;
+  g.strokeStyle = style; g.lineWidth = 1.5; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(tx, ty); g.lineTo(ax, ty); g.arc(ax, ty + r, r, -Math.PI / 2, Math.PI / 2, false); g.lineTo(cx - 2.4, ty + r * 2); g.stroke();
+  g.beginPath(); g.moveTo(tx + 3.3, ty - 3.3); g.lineTo(tx, ty); g.lineTo(tx + 3.3, ty + 3.3); g.stroke();   // barbs trail back from the tip
+}
+function drawBack(g) {
+  const live = hist.length > 0;
+  if (!tinted()) return backPath(g, `rgba(255,236,224,${!live ? .2 : hover.back ? 1 : .68})`);
+  const [ink, glow] = tint === 'hover' && !live ? ['rgba(255,236,224,.2)', 0] : markLook(live, live && hover.back);   // a dead arrow never glows
+  putGlow(g, markGlow('back' + header().back[0], backPath), glow);
+  backPath(g, ink);
+}
+function glideLines(g, name, c1, c2) { const x = header().glide[0]; textL(g, 'GLIDE', x, HCY - 5.5, `600 6.5px ${UI}`, c1, 1.3); textL(g, name, x, HCY + 5, `600 8px ${UI}`, c2, .6); }
+function drawGlide(g) {
+  const [x, w] = header().glide, cx = x + w / 2, on = glide > 0, name = GLIDES[glide].name;
+  const dim = `rgba(170,178,194,${hover.glide ? .95 : .62})`, lit = hover.glide ? '#fff' : 'rgba(255,240,230,.94)';
+  if (tinted()) {                                         // the open list counts as the pointer being on it
+    const [ink, glow] = markLook(on, hover.glide || glist);
+    putGlow(g, markGlow('glide' + x + name, (h, c) => glideLines(h, name, c, c)), glow);
+    glideLines(g, name, tint === 'hover' ? (hover.glide || glist ? ink : dim) : ink, ink);
+  } else if (glideV === 'under') {
+    const f = `600 7.5px ${UI}`; g.font = f; g.letterSpacing = '1.6px';
+    const wa = g.measureText('GLIDE').width, wb = g.measureText(name).width, x0 = cx - (wa + 6 + wb) / 2;
+    textL(g, 'GLIDE', x0, GLY, f, dim, 1.6); textL(g, name, x0 + wa + 6, GLY, f, on ? lit : dim, 1.6);
+  } else if (headV === 'bare') {                          // both lines from one left edge, as far off SHATTER as the arrow is
+    glideLines(g, name, dim, on ? lit : dim);
+  } else {
+    const o = roomH() ? 1 : 0;                              // taller rails: the two lines stand a little further apart
+    text(g, 'GLIDE', cx, HCY - 5.5 - o, `600 6.5px ${UI}`, dim, 1.3); text(g, name, cx, HCY + 5 + o * .5, `600 ${8 + o * .5}px ${UI}`, on ? lit : dim, .6);
+  }
+}
+function drawMix(g) {
+  const f = wet / 127, hot = hover.mix || !!(drag && drag.mix), a = A0 + SWEEP * f, pct = Math.round(f * 100) + '%';
+  if (mixV === 'row') {                                   // the ninth knob: white, no burst behind it, in the look the chips pick
+    const cx = kx(8), R = MR(), r = R + 6.5;
+    if (mixLook === 'apart') {                            // a hairline between the eight and MIX
+      const xd = (kx(7) + cx) / 2; g.strokeStyle = 'rgba(255,255,255,.16)'; g.lineWidth = 1; g.lineCap = 'butt';
+      g.beginPath(); g.moveTo(xd, KY - 30); g.lineTo(xd, LABEL_Y + 8); g.stroke();
+    }
+    arc(g, cx, KY, r, A0, A0 + SWEEP, 1.4, 'rgba(255,255,255,.13)', 'round');
+    const neonMix = mixTint === 'neon', up = (.3 + .7 * f) * (hot ? 1.45 : 1);   // the glow's strength: more as the knob comes up, more in the hand
+    if (f > .004 && neonMix) {                            // no blur: wide faint strokes under a tube-white core, as the eight build their glow
+      [[10, .07], [6.5, .16], [3.8, .34]].forEach(([w, al]) => arc(g, cx, KY, r, A0, a, w, rgba(NEON_C, Math.min(1, al * up)), 'round'));
+      arc(g, cx, KY, r, A0, a, 1.7, rgba(TUBE_C, 1), 'round');
+      const ex = cx + Math.cos(a) * r, ey = KY + Math.sin(a) * r;
+      radial(g, ex, ey, 9, [[0, NEON_C, Math.min(1, .75 * up)], [1, NEON_C, 0]]); g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ey, 2.3, 0, 7); g.fill();
+    } else if (f > .004) {
+      [[6, .08], [3.6, .18]].forEach(([w, al]) => arc(g, cx, KY, r, A0, a, w, rgba(NEUTRAL, al * (hot ? 1.7 : 1)), 'round'));
+      arc(g, cx, KY, r, A0, a, 1.7, rgba(NEUTRAL, 1), 'round');
+      g.fillStyle = '#fff'; g.beginPath(); g.arc(cx + Math.cos(a) * r, KY + Math.sin(a) * r, 2.3, 0, 7); g.fill();
+    }
+    if (mixLook === 'hollow') {                           // no cap: an open ring the glass shows through, its two ends named
+      g.fillStyle = 'rgba(3,4,8,.45)'; g.beginPath(); g.arc(cx, KY, R, 0, 7); g.fill();
+      arc(g, cx, KY, R - .6, 0, 7, 1, 'rgba(255,255,255,.36)');
+      text(g, 'DRY', cx - 27, KY + 33, `600 6px ${UI}`, 'rgba(170,178,194,.85)', 1);
+      text(g, 'WET', cx + 27, KY + 33, `600 6px ${UI}`, 'rgba(170,178,194,.85)', 1);
+    } else {
+      g.drawImage(R === KR ? cap : capS, cx - R - CP, KY - R - CP, (R + CP) * 2, (R + CP) * 2);
+      if (neonMix) {                                      // the cap catches the red: in the dish, round the edge and along the top, as the eight catch theirs
+        const nc = mix(NEON_C, WHITE, .25), er = R - 4.2, gr = g.createLinearGradient(cx - er * .8, 0, cx + er * .8, 0);
+        g.save(); g.beginPath(); g.arc(cx, KY, R - 1.8, 0, 7); g.clip(); radial(g, cx, KY + R * .55, R * 1.25, [[0, NEON_C, .06 + .34 * f], [1, NEON_C, 0]]); g.restore();
+        arc(g, cx, KY, R - .4, 0, 7, 1, rgba(nc, .1 + .5 * f));
+        gr.addColorStop(0, rgba(nc, 0)); gr.addColorStop(.5, rgba(nc, Math.min(1, .3 + .7 * f))); gr.addColorStop(1, rgba(nc, 0));
+        arc(g, cx, KY, er, Math.PI * 1.2, Math.PI * 1.8, 1.6, gr, 'butt');
+      } else arc(g, cx, KY, R - .4, 0, 7, 1, rgba(NEUTRAL, .08 + .3 * f));
+    }
+    g.strokeStyle = 'rgba(255,255,255,.97)'; g.lineWidth = 1.9; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * R * .3, KY + Math.sin(a) * R * .3); g.lineTo(cx + Math.cos(a) * R * .74, KY + Math.sin(a) * R * .74); g.stroke();
+    if (hot) text(g, pct, cx, LABEL_Y, `600 11px ${UI}`, '#fff', .4);
+    else text(g, 'MIX', cx, LABEL_Y, `600 9px ${UI}`, rgba(mix(DIM, [226, 231, 241], Math.min(1, f * 1.3)), .9), 1.7);
+  } else if (mixV === 'head') {                           // a small knob right of SHATTER
+    const [cx, cy] = mixHead(), R = 6.5, r = 9.3;
+    arc(g, cx, cy, r, A0, A0 + SWEEP, 1.2, 'rgba(255,255,255,.14)', 'round');
+    if (f > .004) arc(g, cx, cy, r, A0, a, 1.5, rgba(NEUTRAL, hot ? 1 : .9), 'round');
+    g.fillStyle = '#0a0b10'; g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fill();
+    arc(g, cx, cy, R, 0, 7, 1, 'rgba(255,255,255,.2)');
+    g.strokeStyle = 'rgba(255,255,255,.95)'; g.lineWidth = 1.5; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * R * .2, cy + Math.sin(a) * R * .2); g.lineTo(cx + Math.cos(a) * R * .8, cy + Math.sin(a) * R * .8); g.stroke();
+    if (hot) text(g, pct, cx, cy + 17, `600 7.5px ${UI}`, '#fff', .2);
+    else text(g, 'MIX', cx, cy + 17, `600 6.5px ${UI}`, 'rgba(170,178,194,.8)', 1.3);
+  } else {                                                // a slim bar on the right edge, filled from the bottom
+    const { x, y0, y1 } = EDGE, yv = y1 - (y1 - y0) * f;
+    g.lineCap = 'round'; g.lineWidth = 2;
+    g.strokeStyle = 'rgba(255,255,255,.13)'; g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y1); g.stroke();
+    if (f > .004) { g.strokeStyle = rgba(NEUTRAL, hot ? 1 : .85); g.beginPath(); g.moveTo(x, y1); g.lineTo(x, yv); g.stroke(); }
+    radial(g, x, yv, 8, [[0, NEUTRAL, hot ? .5 : .3], [1, NEUTRAL, 0]]); g.fillStyle = '#fff'; g.beginPath(); g.arc(x, yv, 2.6, 0, 7); g.fill();
+    if (hot) text(g, pct, x - 3, LABEL_Y, `600 8px ${UI}`, '#fff', 0);
+    else text(g, 'MIX', x - 1, LABEL_Y, `600 7.5px ${UI}`, 'rgba(170,178,194,.85)', 1.2);
+  }
+}
+function drawHold(g, i, k, cx, hot) {                     // the mark that says SHATTER leaves this knob alone
+  const on = held[i], hv = hover.hold === i;
+  if (holdV === 'label') {
+    if (!on && !hv) return;
+    g.strokeStyle = rgba(k.color, on ? 1 : .45); g.lineWidth = 1.5; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx - 10, LABEL_Y + 9); g.lineTo(cx + 10, LABEL_Y + 9); g.stroke();
+  } else {                                                // a small shard in the ring's gap: faint, brighter near the pointer, filled when held
+    g.beginPath(); g.moveTo(cx, pinY - 4.4); g.lineTo(cx + 3.1, pinY); g.lineTo(cx, pinY + 4.4); g.lineTo(cx - 3.1, pinY); g.closePath();
+    if (on) { g.fillStyle = rgba(mix(k.color, WHITE, .25), 1); g.fill(); }
+    g.strokeStyle = on ? 'rgba(255,255,255,.9)' : `rgba(255,255,255,${hv ? .8 : hot ? .42 : .17})`; g.lineWidth = 1; g.lineJoin = 'miter'; g.stroke();
+  }
+}
+
+function draw(g) {
+  g.setTransform(S, 0, 0, S, 0, 0);
+  g.fillStyle = '#030408'; g.fillRect(0, 0, W, H);
+  g.globalAlpha = Math.min(1, .3 + .7 * energy + flash() * .4); g.drawImage(plate.lines, 0, 0, W, H); g.globalAlpha = 1;
+
+  const K = KNOBS.map((k, i) => {
+    const f = vals[k.macro] / 127;
+    return { i, k, f, cx: kx(i), a: A0 + SWEEP * f, hot: hover.knob === i || (drag && drag.knob === i), B: plate.bursts[i] };
+  });
+  for (const { i, f, cx, hot, B } of K) {                // thrown fractures: long, crisp, only as bright as the knob is up
+    const A = Math.min(1, Math.pow(f, 1.4) * (hot ? 1.25 : 1) + flash() * .25);
+    if (A < .01) continue;
+    for (const t of plate.throws[i]) {
+      const x = cx + t.ox, y = KY + t.oy, dx = Math.cos(t.a), dy = Math.sin(t.a), l0 = t.l0 * (.35 + .65 * f), l1 = t.l1 * (.35 + .65 * f);
+      fade(g, x - dx * l0, y - dy * l0, x + dx * l1, y + dy * l1, [[0, t.col, 0], [l0 / (l0 + l1), mix(t.col, WHITE, .3), t.k * A], [1, t.col, 0]], t.lw);
+    }
+  }
+  for (const { f, cx, hot, B } of K) {                   // the burst grows, brightens and turns with the value
+    const sc = .46 + .74 * f + (hot ? .05 : 0), d = BR * 2 * sc;
+    g.save(); g.translate(cx, KY); g.rotate(B.spin * f * 1.7);
+    g.globalAlpha = Math.min(1, Math.pow(f, .75) * 1.08 + (hot ? .1 : 0) + flash() * .3); g.drawImage(B.img, -d / 2, -d / 2, d, d);
+    g.restore();
+  }
+
+  const hd = g.createLinearGradient(0, 0, 0, 60); hd.addColorStop(0, 'rgba(3,4,8,.88)'); hd.addColorStop(.7, 'rgba(3,4,8,.6)'); hd.addColorStop(1, 'rgba(3,4,8,0)');
+  g.fillStyle = hd; g.fillRect(0, 0, W, 60);
+  const sh = g.createLinearGradient(0, 0, W * .5, H * 1.6); sh.addColorStop(0, 'rgba(255,255,255,.05)'); sh.addColorStop(.5, 'rgba(255,255,255,.008)'); sh.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = sh; g.beginPath(); g.moveTo(0, 0); g.lineTo(W * .58, 0); g.lineTo(W * .4, H); g.lineTo(0, H); g.closePath(); g.fill();   // faint rake of light across the glass
+
+  // wordmark: glow breathes with the patch's energy
+  const sw = wm.glow.width / S, shh = wm.glow.height / S, wx = WMX - wm.pad / S, wy = WMY - shh / 2, on = lit();
+  if (on < 1) g.drawImage(wm.off, wx, wy, sw, shh);
+  g.globalAlpha = on * (.66 + .34 * energy); g.drawImage(wm.glow, wx, wy, sw, shh);
+  g.globalAlpha = on; g.drawImage(wm.tube, wx, wy, sw, shh); g.globalAlpha = 1;
+
+  // SHATTER: the neon tube, flickers with the sign
+  const [sx, sy, sW, sH] = shardRect();
+  const hs = hover.shatter, scx = sx + sW / 2, scy = sy + sH / 2, spr = c => g.drawImage(c, sx - SPAD / 2, sy - SPAD / 2, sW + SPAD, sH + SPAD);
+  const Hd = header();
+  if (headV === 'wings') drawWings(g);
+  if (headV === 'buttons') {
+    drawSideTube(g, tubeB, Hd.back[0], hist.length > 0, hover.back, on);
+    drawSideTube(g, tubeG, Hd.glide[0], glide > 0 || glist, hover.glide, on);
+  }
+  if (headV === 'tube') {                                 // one tube round all three, a hairline between the cells
+    const x = Hd.rig[0], any = hs || hover.glide || (hover.back && hist.length);
+    if (on < 1) putTube(g, tubeRig, tubeRig.off, x);
+    g.globalAlpha = on * (any ? 1 : .68); putTube(g, tubeRig, tubeRig.glow, x); g.globalAlpha = on; putTube(g, tubeRig, tubeRig.tube, x); g.globalAlpha = 1;
+    g.strokeStyle = `rgba(255,243,230,${.34 * on})`; g.lineWidth = 1; g.lineCap = 'butt';
+    for (const dx of [sx, sx + sW]) { g.beginPath(); g.moveTo(dx, HCY - 9); g.lineTo(dx, HCY + 9); g.stroke(); }
+  } else {
+    if (on < 1) spr(neon.off);
+    g.globalAlpha = on * (hs ? 1 : .68); spr(neon.glow); g.globalAlpha = on; spr(neon.tube); g.globalAlpha = 1;
+  }
+  text(g, 'SHATTER', scx, scy + .5, `600 9.5px ${UI}`, hs ? '#fff' : 'rgba(255,240,230,.94)', 2.4);
+  drawBack(g); drawGlide(g);
+
+  drawSlots(g);
+
+  for (const { k, f, cx, a, hot, B } of K) {
+    const r = KR + 6.5, col = mix(k.color, WHITE, .1 + f * .25);
+    arc(g, cx, KY, r, A0, A0 + SWEEP, 1.4, 'rgba(255,255,255,.13)', 'round');
+    if (f > .004) {
+      [[6, .1], [3.6, .22]].forEach(([w, al]) => arc(g, cx, KY, r, A0, a, w, rgba(col, al * (hot ? 1.7 : 1)), 'round'));
+      arc(g, cx, KY, r, A0, a, 1.7, rgba(col, 1), 'round');
+      const ex = cx + Math.cos(a) * r, ey = KY + Math.sin(a) * r;
+      radial(g, ex, ey, 9, [[0, k.color, .7], [1, k.color, 0]]); g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ey, 2.3, 0, 7); g.fill();
+    }
+    g.drawImage(cap, cx - KR - CP, KY - KR - CP, (KR + CP) * 2, (KR + CP) * 2);
+    // the cap catches its burst: colour in the dish and around the edge, more as the knob comes up
+    g.save(); g.beginPath(); g.arc(cx, KY, KR - 1.8, 0, 7); g.clip();
+    radial(g, cx, KY + KR * .55, KR * 1.25, [[0, B.col, .08 + .34 * f], [1, B.col, 0]]); g.restore();
+    arc(g, cx, KY, KR - .4, 0, 7, 1, rgba(mix(B.col, WHITE, .3), .08 + .5 * f));
+    const er = KR - 4.2, ec = mix(B.col, WHITE, .3), gr = g.createLinearGradient(cx - er * .8, 0, cx + er * .8, 0);   // the arc's colour caught along the cap's top edge
+    gr.addColorStop(0, rgba(ec, 0)); gr.addColorStop(.5, rgba(ec, Math.min(1, .35 + .75 * f))); gr.addColorStop(1, rgba(ec, 0));
+    arc(g, cx, KY, er, Math.PI * 1.2, Math.PI * 1.8, 1.6, gr, 'butt');
+    const pc = mix(WHITE, B.col, .18 * f);
+    g.strokeStyle = rgba(pc, .97); g.lineWidth = 1.9; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx + Math.cos(a) * KR * .3, KY + Math.sin(a) * KR * .3); g.lineTo(cx + Math.cos(a) * KR * .74, KY + Math.sin(a) * KR * .74); g.stroke();
+    const i = KNOBS.indexOf(k), lit = holdV === 'label' && held[i];   // a held label reads at full white
+    if (hot) text(g, Math.round(f * 100) + '%', cx, LABEL_Y, `600 11px ${UI}`, rgba(mix(k.color, WHITE, .2), 1), .4);
+    else text(g, k.label, cx, LABEL_Y, `600 9px ${UI}`, lit ? 'rgba(255,255,255,.98)' : rgba(mix([150, 157, 172], [226, 231, 241], Math.min(1, f * 1.3)), .9), 1.7);
+    drawHold(g, i, k, cx, hot);
+  }
+  drawMix(g);
+
+  if (list) drawList(g);
+  if (glist) drawGlist(g);
+  if (edit) drawEdit(g);
+}
+
+// ---------- loop ----------
+const zoom = document.getElementById('zoom'), actual = document.getElementById('actual');
+const zg = zoom.getContext('2d'), ag = actual.getContext('2d');
+let raf = 0;
+const target = () => vals.reduce((a, b) => a + b, 0) / 8 / 127;
+function frame() {
+  raf = 0;
+  let busy = false;
+  if (anim) {                                             // GLIDE: every knob that has not been grabbed eases to where it is going
+    const k = Math.min(1, (performance.now() - anim.t0) / anim.dur), e = k * k * (3 - 2 * k);
+    for (let m = 0; m < 8; m++) if (!anim.free[m]) vals[m] = anim.from[m] + (anim.to[m] - anim.from[m]) * e;
+    if (k >= 1) anim = null; else busy = true;
+  }
+  const t = target(); energy += (t - energy) * .16;
+  if (Math.abs(t - energy) < .002) energy = t; else busy = true;
+  sp = shT < 0 ? 1 : Math.min(1, (performance.now() - shT) / 560);
+  if (sp < 1) busy = true;
+  if (hold && !hold.done) {                               // held long enough: the save lands while the button is still down
+    if (performance.now() - hold.t0 >= HOLD_MS) { hold.done = true; saveInto(hold.slot); } else busy = true;
+  }
+  zg.save(); draw(zg); zg.restore();
+  ag.setTransform(1, 0, 0, 1, 0, 0); ag.drawImage(zoom, 0, 0);
+  if (busy) kick();
+}
+function kick() { if (!raf) raf = requestAnimationFrame(frame); }
+
+// ---------- pointer and keys ----------
+function pt(e) { const b = e.currentTarget.getBoundingClientRect(); return [(e.clientX - b.left) * W / b.width, (e.clientY - b.top) * H / b.height]; }
+function hit(x, y) {
+  if (glist) {
+    const R = glistRect();
+    if (x >= R.x && x <= R.x + R.w && y >= R.y && y <= R.y + R.h) return { grow: Math.max(0, Math.min(GLIDES.length - 1, (y - R.y - 1) / GLIST.row | 0)) };
+  }
+  if (list) {
+    const R = listRect();
+    if (x >= R.x && x <= R.x + R.w && y >= R.y && y <= R.y + R.h) {
+      const ry = y - R.y - 1;
+      if (ry >= R.rows * LIST.row) return { list: true, foot: Math.min(2, (x - R.x) / (R.w / 3) | 0) };
+      if (bank.length > R.rows && x > R.x + R.w - 10) return { list: true, bar: true };
+      return { list: true, row: list.scroll + Math.max(0, ry / LIST.row | 0) };
+    }
+  }
+  for (let i = 0; i < 8; i++) {                           // the hold marks come ahead of the knobs: the shard sits inside a knob's reach
+    if (holdV === 'pin' ? Math.hypot(x - kx(i), y - pinY) < 6.5 : Math.abs(x - kx(i)) < 30 && y > LABEL_Y - 8 && y < LABEL_Y + 13) return { hold: i };
+  }
+  for (let i = 0; i < 8; i++) if (Math.hypot(x - kx(i), y - KY) < KR + 12) return { knob: i };
+  if (mixV === 'row' ? Math.hypot(x - kx(8), y - KY) < MR() + 12 : mixV === 'head' ? Math.hypot(x - mixHead()[0], y - mixHead()[1]) < 13
+    : Math.abs(x - EDGE.x) < 9 && y > EDGE.y0 - 8 && y < LABEL_Y + 10) return { mix: true };
+  const Hd = header(), [bx, bw] = Hd.back, [gx, gw] = Hd.glide;
+  if (x >= bx - 3 && x <= bx + bw + 3 && Math.abs(y - HCY) < 12) return { back: true };
+  if (x >= gx && x <= gx + gw && (glideV === 'under' ? Math.abs(y - GLY) < 7 : Math.abs(y - HCY) < 13)) return { glide: true };
+  const L = layout();
+  for (let i = 0; i < L.length; i++) {
+    const { x: sx, w, pager } = L[i];
+    if (x < sx || x > sx + w || y < PILL.y || y > PILL.y + PILL.h) continue;
+    if (pager) return { slot: i, zone: x < sx + 16 ? 'prev' : x > sx + w - 16 ? 'next' : 'name' };
+    return { slot: i, zone: version === 'a' && x >= sx + w / 2 + 12 && y >= PILL.y + 12 ? 'caret' : 'name' };
+  }
+  const [sx, sy, sW, sH] = shardRect(); if (x >= sx && x <= sx + sW && y >= sy && y <= sy + sH) return { shatter: true };
+  return {};
+}
+function slotDown(h, e) {
+  const s = h.slot;
+  if (version === 'a') {
+    if (h.zone === 'caret') list = { slot: s, scroll: Math.max(0, Math.min(maxScroll(), bank.indexOf(slotRef[s]) - 2)) };
+    else { if (loaded !== slotRef[s]) pushHist(); load(slotRef[s]); }
+  } else if (version === 'b') {
+    if (e.altKey) { if (loaded === bslot[s]) loaded = null; bslot[s] = s < 3 ? clone(STOCK[s]) : null; }   // back to how it shipped
+    else if (e.shiftKey) saveInto(s);                     // the fallback if the device cannot see a mouse-up
+    else hold = { slot: s, t0: performance.now(), done: false };
+  } else if (!layout()[s].pager) load(bank[s]);
+  else {
+    const users = bank.slice(3), P = users[pg];
+    if (h.zone === 'prev') { if (pg > 0) load(users[--pg]); }
+    else if (h.zone === 'next') { if (pg < users.length) load(users[++pg]); }   // the last step lands on the save stop and loads nothing
+    else if (!P) { const N = saveNew(); pg = bank.length - 4; openEdit(N, s); }
+    else if (e.altKey) remove(P);
+    else load(P);
+  }
+}
+function listDown(h, e) {
+  const s = list.slot, cur = slotRef[s], armed = list.arm;
+  list.arm = false;                                       // any other click calls a pending delete off
+  if (h.bar) barDrag = { y: e.clientY, s0: list.scroll, k: H / e.currentTarget.getBoundingClientRect().height };
+  else if (h.row !== undefined) { if (loaded !== bank[h.row]) pushHist(); slotRef[s] = bank[h.row]; load(bank[h.row]); list = null; }
+  else if (h.foot === 0) { const P = saveNew(); slotRef[s] = P; openEdit(P, s); }
+  else if (cur.stock) return;
+  else if (h.foot === 1) openEdit(cur, s);
+  else if (!armed) list.arm = true;                       // DELETE asks once more: the label turns to CONFIRM
+  else { remove(cur); list.scroll = Math.min(list.scroll, maxScroll()); }
+}
+for (const c of [zoom, actual]) {
+  c.addEventListener('mousedown', e => {
+    const [x, y] = pt(e), h = hit(x, y);
+    if (edit) {                                           // a click in the field keeps typing; a click anywhere else keeps the name
+      const [ex, ey, ew, eh] = editRect();
+      if (x >= ex && x <= ex + ew && y >= ey && y <= ey + eh) { edit.sel = false; kick(); return; }
+      closeEdit(true);
+    }
+    if (list) {
+      if (h.list) { listDown(h, e); kick(); return; }
+      const s = list.slot; list = null;
+      if (h.slot === s && h.zone === 'caret') { kick(); return; }   // the caret closes its own list
+    }
+    if (glist) {                                          // a row picks, a click anywhere else shuts it
+      glist = false;
+      if (h.grow !== undefined) glide = h.grow;
+      if (h.grow !== undefined || h.glide) { kick(); return; }
+    }
+    if (h.hold !== undefined) held[h.hold] = !held[h.hold];
+    else if (h.knob !== undefined) { drag = { knob: h.knob, y: e.clientY }; if (anim) anim.free[KNOBS[h.knob].macro] = true; }   // a grabbed knob leaves the glide
+    else if (h.mix) drag = { mix: true, y: e.clientY };
+    else if (h.back) back();
+    else if (h.glide) { if (glidePick === 'list') { list = null; glist = true; } else drag = { glide: true, y: e.clientY, from: glide, moved: false }; }
+    else if (h.slot !== undefined) slotDown(h, e);
+    else if (h.shatter) { pushHist(); shatter(); }
+    kick();
+  });
+  c.addEventListener('dblclick', e => {
+    if (edit) return;
+    const [x, y] = pt(e), h = hit(x, y);
+    if (h.slot === undefined || h.zone !== 'name') return;
+    hold = null;
+    if (version === 'b' && bslot[h.slot]) openEdit(bslot[h.slot], h.slot);
+    else if (version === 'c' && layout()[h.slot].pager && bank[3 + pg]) openEdit(bank[3 + pg], h.slot);
+    kick();
+  });
+  c.addEventListener('mousemove', e => {
+    if (drag || barDrag) return;
+    const [x, y] = pt(e), h = hit(x, y);
+    hover = { knob: h.knob ?? -1, slot: h.slot ?? -1, zone: h.zone || '', shatter: !!h.shatter, row: h.row ?? -1, foot: h.foot ?? -1,
+      back: !!h.back, glide: !!h.glide, mix: !!h.mix, hold: h.hold ?? -1, grow: h.grow ?? -1 };
+    c.style.cursor = h.knob !== undefined || h.mix || (h.glide && glidePick === 'step') ? 'ns-resize' : (h.slot !== undefined || h.shatter || h.list || h.glide || h.grow !== undefined || h.hold !== undefined || (h.back && hist.length)) ? 'pointer' : 'default';
+    kick();
+  });
+  c.addEventListener('mouseleave', () => { if (!drag) { hover = NOHOVER; kick(); } });
+  c.addEventListener('wheel', e => {                      // the list also scrolls by dragging its bar
+    if (!list) return;
+    const [x, y] = pt(e); if (!hit(x, y).list) return;
+    e.preventDefault(); wheelAcc += e.deltaY;
+    const step = wheelAcc / 24 | 0; if (!step) return;
+    wheelAcc -= step * 24; list.scroll = Math.max(0, Math.min(maxScroll(), list.scroll + step)); kick();
+  }, { passive: false });
+}
+window.addEventListener('mousemove', e => {
+  if (barDrag && list) {
+    const per = Math.min(bank.length, LIST.max) * LIST.row / bank.length;   // face pixels of bar travel per row
+    list.scroll = Math.max(0, Math.min(maxScroll(), Math.round(barDrag.s0 + (e.clientY - barDrag.y) * barDrag.k / per))); kick(); return;
+  }
+  if (!drag) return;
+  if (drag.glide) {                                       // a drag on the glide word runs through the lengths, 9 px a step
+    if (Math.abs(drag.y - e.clientY) > 3) drag.moved = true;
+    if (drag.moved) glide = Math.max(0, Math.min(GLIDES.length - 1, drag.from + Math.round((drag.y - e.clientY) / 9)));
+    kick(); return;
+  }
+  if (drag.mix) { wet = Math.max(0, Math.min(127, wet + (drag.y - e.clientY) * .7)); drag.y = e.clientY; kick(); return; }   // MIX belongs to no preset
+  const m = KNOBS[drag.knob].macro;
+  vals[m] = Math.max(0, Math.min(127, vals[m] + (drag.y - e.clientY) * .7)); drag.y = e.clientY;
+  loaded = null; kick();
+});
+window.addEventListener('mouseup', e => {
+  if (hold) { if (!hold.done) load(bslot[hold.slot]); hold = null; }   // let go early: a tap, which loads
+  barDrag = null;
+  if (drag) { const c = e.target === zoom || e.target === actual ? e.target : null, b = c && c.getBoundingClientRect();
+    const h = c ? hit((e.clientX - b.left) * W / b.width, (e.clientY - b.top) * H / b.height) : {};
+    if (drag.glide && !drag.moved) glide = (glide + 1) % GLIDES.length;   // no drag: a click, which steps on
+    hover = { ...NOHOVER, knob: h.knob ?? -1, mix: !!h.mix, glide: !!h.glide }; }
+  drag = null; kick();
+});
+window.addEventListener('keydown', e => {
+  if (edit) {                                             // typed, capitals, nine characters; Enter keeps it, Esc leaves the name as it was
+    if (e.key === 'Enter') closeEdit(true);
+    else if (e.key === 'Escape') closeEdit();
+    else if (e.key === 'Backspace') { edit.text = edit.sel ? '' : edit.text.slice(0, -1); edit.sel = false; }
+    else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+      if (edit.sel) { edit.text = ''; edit.sel = false; }
+      if (edit.text.length < NAME_MAX) edit.text += e.key.toUpperCase();
+    } else return;
+    if (edit) edit.t0 = performance.now();
+    e.preventDefault(); kick();
+  } else if ((list || glist) && e.key === 'Escape') { list = null; glist = false; kick(); }
+});
+
+const VERSIONS = [
+  { key: 'a', chip: 'A: one bank, three slots', cap: 'Click a name to load it. Hover a slot and click the caret at the end of its colour line to open the bank. Picking a row puts that preset in the slot and loads it. SAVE NEW keeps the current knobs and glass as a new preset. RENAME and DELETE act on the preset this slot holds, and stay dim on a stock one. DELETE turns to CONFIRM and needs a second click; clicking anywhere else calls it off. The same bank sits behind all three slots.' },
+  { key: 'b', chip: 'B: four slots', cap: 'Tap a slot to load it. Hold it for 0.7 seconds to save the current knobs and glass into it (shift-click does the same). Double-click a name to rename it. Option-click puts a slot back to how it shipped. The four slots are the whole bank, so a fifth save has to replace one.' },
+  { key: 'c', chip: 'C: stock and a pager', cap: 'The three stock presets stay where they are. The chevrons step through your own presets and load each one as you land on it. One step past the last is SAVE NEW: click it to keep the current knobs and glass. Double-click a name to rename it, option-click it to delete it.' }
+];
+const NAMING = ' Naming: type, Enter keeps it, Esc leaves the name as it was. Capitals, nine characters.';
+const MIXES = [
+  { key: 'row', chip: 'Ninth knob', cap: 'MIX is a ninth knob at the end of the row, plain white with no burst behind it. The other eight sit closer together to make room.' },
+  { key: 'head', chip: 'Header knob', cap: 'MIX is a small knob in the header, right of SHATTER. The knob row stays as it is.' },
+  { key: 'edge', chip: 'Edge bar', cap: 'MIX is a slim bar on the right edge. Drag it up and down. The knob row gives up 14 pixels.' }
+];
+const LOOKS = [
+  { key: 'plain', chip: 'Plain white', cap: 'MIX is the ninth knob, white, with no burst behind it. Nothing else sets it apart.' },
+  { key: 'apart', chip: 'Set apart', cap: 'MIX stands off the end of the row behind a hairline. The eight sit a little closer together to make the gap.' },
+  { key: 'hollow', chip: 'Open ring', cap: 'MIX has no cap: an open ring the glass shows through, with DRY and WET at the ends of its arc.' },
+  { key: 'small', chip: 'Smaller', cap: 'MIX is a smaller knob than the eight, in the same row.' }
+];
+const HOLDS = [
+  { key: 'label', chip: 'Click the label', cap: 'HOLD: click a knob\'s label. A line in the knob\'s colour sits under it and SHATTER leaves that knob where it is. Click again to let go.' },
+  { key: 'pin', chip: 'Shard under the ring', cap: 'HOLD: click the small shard in the gap under a knob\'s ring. It fills with the knob\'s colour and SHATTER leaves that knob where it is. Click again to let go.' }
+];
+const GLIDEVS = [
+  { key: 'under', chip: 'Under SHATTER', cap: 'GLIDE sits under SHATTER.' },
+  { key: 'beside', chip: 'Beside SHATTER', cap: 'GLIDE sits right of SHATTER.' }
+];
+const TINTS = [
+  { key: 'white', chip: 'White (today)', cap: 'MARKS: the arrow and the glide text are white, as they run in Live today.' },
+  { key: 'neon', chip: 'Neon, like the pill', cap: 'MARKS: the pill\'s own recipe. Each is unlit glass until it has something to show: the arrow lights when there is a step to go back to, the glide text lights when glide is on. Lit, they glow red, and more under the pointer.' },
+  { key: 'red', chip: 'Red ink', cap: 'MARKS: the sign\'s red as flat ink, dimmer when there is nothing to show. The glow comes only under the pointer.' },
+  { key: 'hover', chip: 'White, red glow on hover', cap: 'MARKS: white at rest, as today. Under the pointer they turn the pill\'s warm white and glow red.' }
+];
+const MIXCS = [
+  { key: 'white', chip: 'White (today)', cap: '' },
+  { key: 'neon', chip: 'Neon, stronger as it comes up', cap: ' MIX COLOUR: the sign\'s neon. Its arc is a warm white tube with a red glow that grows as the knob comes up, and the cap catches the red the way the eight catch their colours. No burst behind it.' }
+];
+const HEADS = [
+  { key: 'bare', chip: 'Bare marks', cap: 'HEADER: SHATTER has the only tube. The back arrow and the glide word sit bare on either side, the same distance from it.' },
+  { key: 'buttons', chip: 'Three buttons', cap: 'HEADER: back and glide each get a tube like SHATTER\'s, a little lower so SHATTER stays the tall one. A side tube is unlit glass until it has something to do: back lights when there is a step to go back to, glide lights when it is on.' },
+  { key: 'wings', chip: 'Rig: wings', cap: 'HEADER: SHATTER keeps its tube and a hairline rail runs out of each end of it. Back rides the left rail, glide the right.' },
+  { key: 'tube', chip: 'Rig: one tube', cap: 'HEADER: one tube runs round all three, with a hairline between the cells. SHATTER gives up a tube of its own.' }
+];
+const ROOMS = [
+  { key: 'tight', chip: 'As it was', cap: '' },
+  { key: 'wide', chip: 'Presets pushed right', cap: ' ROOM: the three presets sit 20 pixels further right and a little closer together, the rig is centred in the gap and its two cells are wider.' },
+  { key: 'tall', chip: 'Taller rails', cap: ' ROOM: the rails stand nearly as tall as SHATTER\'s tube and the rig is centred in the gap. The presets stay where they are.' },
+  { key: 'both', chip: 'Both', cap: ' ROOM: presets pushed right and taller rails together.' }
+];
+const GPICKS = [
+  { key: 'step', chip: 'Click and drag', cap: 'Click the glide word to step on to the next length, or drag up and down on it to run through them.' },
+  { key: 'list', chip: 'List', cap: 'Click the glide word to open the lengths as a list, then click one.' }
+];
+const ALWAYS = [
+  'BACK is the U-turn arrow left of SHATTER. It steps back through SHATTERs and preset loads, glass included, up to 16 steps, and is dim when there is nothing to go back to. Knob drags are not in it: Live\'s own undo takes those back one drag at a time.',
+  'With it on, SHATTER, a preset load and BACK move the knobs over that time. Grab a knob mid-glide and it stops where you put it. This page assumes 120 bpm.',
+  'Loading a preset moves every knob, held or not. SHATTER, presets and BACK never move MIX.'
+];
+
+(function boot() {
+  wm = makeWordmark(WMH * S); cap = makeCap(KR); capS = makeCap(15); neon = makeNeon();
+  tubeB = makeTube(BTN.back, BTN.h); tubeG = makeTube(BTN.glide, BTN.h); tubeRig = makeTube(RIG.w, SHH);
+  // stills: ?tint=white|neon|red|hover (the arrow's and the glide text's colour), ?mixc=white|neon (the MIX knob's colour),
+  // stills: ?room=tight|wide|tall|both (air for the wings rig), ?head=bare|buttons|wings|tube (the header), ?gls=3|7 (how many glide lengths), ?gpick=step|list, ?gopen=1 (the glide list),
+  // stills: ?look=plain|apart|hollow|small (the ninth knob), ?mix=row|head|edge, ?hold=label|pin, ?glide=under|beside, ?held=0,3 (knobs), ?gl=0..6 (glide setting), ?wet=0..127,
+  // ?back=1 (one step to go back to), ?saved=5, ?open=0..2 (the list), ?preset=<slot>, ?shatter=<seed>, ?hover=<knob>
+  const qs = new URLSearchParams(location.search);
+  if (VERSIONS.some(v => v.key === qs.get('v'))) version = qs.get('v');
+  saved = qs.get('saved') === '5' ? 5 : 0;
+  const of = (list, k, d) => list.some(v => v.key === k) ? k : d;
+  mixLook = of(LOOKS, qs.get('look'), mixLook); mixV = of(MIXES, qs.get('mix'), mixV); holdV = of(HOLDS, qs.get('hold'), holdV); glideV = of(GLIDEVS, qs.get('glide'), glideV);
+  tint = of(TINTS, qs.get('tint'), tint); mixTint = of(MIXCS, qs.get('mixc'), mixTint); headV = of(HEADS, qs.get('head'), headV); glidePick = of(GPICKS, qs.get('gpick'), glidePick); room = of(ROOMS, qs.get('room'), room);
+  if (qs.get('gls') === '3') GLIDES = GLIDES3;
+  if (headV !== 'bare') glideV = 'beside';                // the three new headers all keep glide beside SHATTER
+  const caption = () => {                                 // one short paragraph per control
+    const names = GLIDES.map(G => G.name), lens = names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+    const P = [HEADS.find(v => v.key === headV).cap + (headV === 'wings' ? ROOMS.find(v => v.key === room).cap : ''), TINTS.find(v => v.key === tint).cap, ALWAYS[0], HOLDS.find(v => v.key === holdV).cap,
+      'GLIDE: ' + lens + '. ' + GPICKS.find(v => v.key === glidePick).cap + ' ' + ALWAYS[1], (mixV === 'row' ? LOOKS.find(v => v.key === mixLook) : MIXES.find(v => v.key === mixV)).cap + (mixV === 'row' ? MIXCS.find(v => v.key === mixTint).cap : ''), ALWAYS[2]];
+    document.getElementById('cap').innerHTML = P.map(t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;')).join('<br><br>');
+  };
+  const chips = (id, names, at, set, fresh) => names.forEach((n, i) => {
+    const b = document.createElement('button'); b.textContent = n; b.className = at === i ? 'on' : '';
+    b.onclick = () => { set(i); if (fresh) reset(); caption(); for (const o of b.parentNode.querySelectorAll('button')) o.className = o === b ? 'on' : ''; kick(); };
+    document.getElementById(id).appendChild(b);
+  });
+  chips('pickLook', LOOKS.map(v => v.chip), LOOKS.findIndex(v => v.key === mixLook), i => mixLook = LOOKS[i].key);
+  chips('pickSaved', ['None', 'Five'], saved ? 1 : 0, i => saved = i * 5, true);
+  reset(); caption();
+  if (qs.get('shatter')) shatter(+qs.get('shatter')); else setGlass(ICON_PAL, 108);
+  const q = qs.get('preset'), o = qs.get('open');
+  if (q !== null) load((version === 'a' ? slotRef : version === 'b' ? bslot : bank)[+q]);
+  if (version === 'a' && o !== null && slotRef[+o]) list = { slot: +o, scroll: 0 };
+  if (qs.get('hover')) hover = { ...NOHOVER, knob: +qs.get('hover') };
+  (qs.get('held') || '').split(',').filter(Boolean).forEach(i => held[+i] = true);
+  if (qs.get('wet') !== null) wet = +qs.get('wet');
+  if (qs.get('back')) pushHist();
+  if (GLIDES[+qs.get('gl')]) glide = +qs.get('gl');
+  if (qs.get('gopen')) glist = true;
+  energy = target();
+  frame();
+  // read by the Playwright check: the state as names, and where things sit in face pixels
+  window.glassMock = {
+    state: () => ({ version, saved, bank: bank.map(P => P.name), slots: (version === 'b' ? bslot : version === 'a' ? slotRef : bank.slice(0, 3)).map(P => P && P.name),
+      pager: version === 'c' ? (bank[3 + pg] ? bank[3 + pg].name : 'SAVE NEW') : null, loaded: loaded && loaded.name, seed: glass.seed,
+      list: list && { ...list, rect: listRect() }, edit: edit && { text: edit.text, sel: edit.sel, rect: editRect() }, vals: vals.map(v => Math.round(v)),
+      headV, tint, mixTint, room, glidePick, glist, lengths: GLIDES.length, mixV, mixLook, holdV, glideV, wet: Math.round(wet), held: held.slice(), glide: GLIDES[glide].name, hist: hist.length, gliding: !!anim }),
+    layout, shardRect, knob: i => [kx(i), KY], header, glistRow: i => { const R = glistRect(); return [R.x + R.w / 2, R.y + 1 + (i + .5) * GLIST.row]; },
+    back: () => { const [x, w] = header().back; return [x + w / 2, HCY]; },
+    glideAt: () => { const [x, w] = header().glide; return [x + w / 2, glideV === 'under' ? GLY : HCY]; },
+    mixAt: () => mixV === 'row' ? [kx(8), KY] : mixV === 'head' ? mixHead() : [EDGE.x, (EDGE.y0 + EDGE.y1) / 2],
+    holdAt: i => holdV === 'pin' ? [kx(i), pinY] : [kx(i), LABEL_Y]
+  };
+})();
+</script>
+</body>
+</html>
