@@ -91,11 +91,11 @@ PILLTX  = (182, 178, 182)        # pill text (~0.68 white)
 VIBECOL = (120, 114, 120)        # credit (~0.42 white)
 
 TAGLINE = "An original Ableton rack + a custom Max for Live face."
-SUBLINE = ("Drives the rack’s 8 macros from a bespoke shattered-glass panel — "
-           "with 3 preset snapshots and a reactive header that lights up with the sound.")
+SUBLINE = ("Drives the rack’s 9 macros from a bespoke shattered-glass panel, "
+           "with your own preset bank and a reactive header that lights up with the sound.")
 LEGEND  = [("MIDNIGHT", (77, 141, 240)), ("ANGELS", (210, 143, 245)),
            ("GHOSTS", (102, 219, 153)), ("SHATTER", (207, 226, 255))]
-PILL    = "Max for Live  ·  jsui  ·  LOM"
+PILL    = "v2.0  ·  Max for Live  ·  jsui  ·  LOM"
 VIBE    = "Vibe-coded with Claude Code"
 
 def th(f):
